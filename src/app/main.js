@@ -800,8 +800,18 @@ function updateSettingsSheet() {
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
       `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}). ` +
       `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? 'worker' : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
-      `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. neomosh v${VERSION}`;
+      `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
+      `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }
+}
+
+// The browser name and version, for the info section (the capture path depends on the browser).
+function browserName() {
+  const ua = navigator.userAgent;
+  const m = ua.match(/(SamsungBrowser|Firefox|FxiOS|EdgA?|OPR|CriOS|Chrome)\/(\d+)/);
+  if (m) return `${m[1]} ${m[2]}${/; wv\)/.test(ua) ? ' (WebView)' : ''}`;
+  const s = ua.match(/Version\/(\d+(\.\d+)?).*Safari/);
+  return s ? `Safari ${s[1]}` : ua.slice(0, 60);
 }
 
 // The time for each frame of the slowest worker. The capture worker and the encoder work in parallel.

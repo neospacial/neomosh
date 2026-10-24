@@ -43,7 +43,7 @@ function firstDiff(a, b) {
 
 // frames: an (async) iterable of the session frames. onProgress(n): frames compared.
 export async function selfTest(workerSrc, params, frames, onProgress) {
-  if (typeof VideoDecoder === 'undefined') return { ok: false, frames: 0, message: 'This browser has no VideoDecoder.' };
+  if (typeof VideoDecoder === 'undefined') return { ok: false, frames: 0, message: 'This browser has no WebCodecs VideoDecoder, so the self-test cannot run. Use Chrome (Android) or Safari (iOS 16.4 or later).' };
   const { w, h } = params;
   const sps = spsNal(params), pps = ppsNal();
   const config = {
