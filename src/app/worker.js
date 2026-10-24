@@ -6,7 +6,7 @@
 import { Encoder } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
 import { coverCrop } from './geometry.js';
-import { FrameGate } from './capture.js';
+import { FrameGate, SourceGaps } from './capture.js';
 
 const MAX_IN_FLIGHT = 6; // R-18 (D19), the same as the main thread path
 
@@ -66,11 +66,13 @@ function encodeRgba(m) {
 
 // One clip from the camera. m: { readable | track, fps, mirror, sessionEndUs, seq, vw, vh }.
 async function captureClip(m, run) {
-  const readable = m.readable || new MediaStreamTrackProcessor({ track: m.track }).readable;
+  // A short buffer absorbs short delays of this worker (the camera keeps its pool of frames).
+  const readable = m.readable || new MediaStreamTrackProcessor({ track: m.track, maxBufferSize: 4 }).readable;
   const reader = readable.getReader();
   cap.reader = reader;
   cap.track = m.track || null;
   const gate = new FrameGate(m.fps);
+  const gaps = new SourceGaps();
   let start = null, sent = 0, seq = m.seq, checked = false;
   try {
     for (;;) {
@@ -86,19 +88,21 @@ async function captureClip(m, run) {
         checked = true;
         if (m.vw !== m.vh && (fw > fh) !== (m.vw > m.vh)) {
           frame.close();
-          self.postMessage({ cmd: 'capMismatch', fw, fh });
+          self.postMessage({ cmd: 'capMismatch', fw, fh, cw: frame.codedWidth, ch: frame.codedHeight, rotation: frame.rotation ?? '-' });
           break;
         }
       }
       const t = frame.timestamp / 1000;
-      if (!gate.next(t).keep) {
+      const g = gate.next(t, gaps.next(t));
+      if (g.lost) self.postMessage({ cmd: 'capDrop', n: g.lost, kind: 'cap' });
+      if (!g.keep) {
         frame.close();
         continue;
       }
       if (cap.inFlight >= MAX_IN_FLIGHT) {
         // R-18, R-19: an encoder drop. The previous frame becomes longer (R-20).
         frame.close();
-        self.postMessage({ cmd: 'capDrop' });
+        self.postMessage({ cmd: 'capDrop', n: 1, kind: 'enc' });
         continue;
       }
       if (start === null) start = t;

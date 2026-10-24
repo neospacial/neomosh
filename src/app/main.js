@@ -798,8 +798,8 @@ function updateSettingsSheet() {
       : `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
         (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '')) +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
-      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}). ` +
-      `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? 'worker' : rec.captureMode === 'page' ? 'page' : '–'}. ` +
+      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}). ` +
+      `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? 'worker' : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. neomosh v${VERSION}`;
   }
 }
@@ -1101,11 +1101,11 @@ document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('cli
 el.thumbBtn.addEventListener('click', openReview);
 // R-19: the help depends on the cause of the drops in this clip.
 el.dropBadge.addEventListener('click', () => {
-  const k = rec ? rec.dropKinds : { enc: 0, page: 0 };
-  const help = k.enc >= k.page
+  const k = rec ? rec.dropKinds : { enc: 0, page: 0, cap: 0 };
+  const help = k.enc >= k.page + k.cap
     ? 'The encoder was busy. Use a smaller size, a smaller search range, or a lower frame rate.'
-    : 'The page was late and did not get all camera frames. Close other apps, or use a lower frame rate.';
-  toast(`${rec ? rec.drops : 0} frames dropped (this clip: encoder busy ${k.enc}, page late ${k.page}). ${help}`, 5000);
+    : 'The app did not get all camera frames in time. Close other apps, or use a smaller size or a lower frame rate.';
+  toast(`${rec ? rec.drops : 0} frames dropped (this clip: encoder busy ${k.enc}, page late ${k.page}, capture late ${k.cap}). ${help}`, 5000);
 });
 
 el.preview.addEventListener('loadedmetadata', layoutFrame);
