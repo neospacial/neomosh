@@ -11,6 +11,8 @@ const $ = (id) => document.getElementById(id);
 const el = {
   body: document.body,
   stage: $('stage'), frame: $('frame'), preview: $('preview'), mosh: $('mosh'), overlay: $('overlay'),
+  fileVideo: $('fileVideo'), fileInput: $('fileInput'), fileScrub: $('fileScrub'), fileTime: $('fileTime'),
+  srcCamera: $('srcCamera'), srcFile: $('srcFile'), gateFile: $('gateFile'),
   toast: $('toast'), timer: $('timer'), clipLbl: $('clipLbl'), shutter: $('shutter'), flip: $('flip'),
   thumbBtn: $('thumbBtn'), thumbImg: $('thumbImg'), slider: $('opacity'), pct: $('pct'),
   orientBtn: $('orientBtn'), ratios: [...document.querySelectorAll('.ratio')],
@@ -28,6 +30,8 @@ const el = {
 // Display and session preferences. Kept in localStorage (a per-viewer convenience only).
 const PREF_KEY = 'neomosh.prefs';
 const S = {
+  source: 'camera', // or 'file' (plan §11.5)
+  fileUrl: '',
   facing: 'environment',
   aspect: '4:3',
   orient: 'auto', // auto, v, or h
@@ -87,8 +91,12 @@ function save(blob, name) {
 const videoTrack = () => (S.stream ? S.stream.getVideoTracks()[0] || null : null);
 const state = () => (rec ? rec.state : 'gate');
 const sessionLocked = () => !!(rec && rec.hasFrames);
-// D8: the front camera is mirrored as displayed, and encoded the same way.
-const mirrored = () => S.facing === 'user' && S.mirrorFront;
+// D8: the front camera is mirrored as displayed, and encoded the same way. A file is never mirrored.
+const mirrored = () => S.source === 'camera' && S.facing === 'user' && S.mirrorFront;
+const activeVideo = () => (S.source === 'file' ? el.fileVideo : el.preview);
+const sourceReady = () => (S.source === 'file'
+  ? !!S.fileUrl && el.fileVideo.readyState >= 2 && el.fileVideo.videoWidth > 0
+  : S.hasVideo && el.preview.videoWidth > 0);
 
 /* ---------------- frame geometry ---------------- */
 
@@ -160,7 +168,7 @@ function stopStream() {
 
 async function startStream(facing) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showGate('Not available', 'This browser does not give access to the camera. Open the page with https or localhost.');
+    showGate('Not available', 'This browser does not give access to the camera. Open the page with https or localhost.', true);
     return false;
   }
   stopStream();
@@ -172,7 +180,7 @@ async function startStream(facing) {
     const why = err && err.name === 'NotAllowedError'
       ? 'Permission was refused. Give permission to the camera, then try again.'
       : 'No camera was found.';
-    showGate('No access', why);
+    showGate('No access', why, true);
     return false;
   }
 }
@@ -189,7 +197,7 @@ function applyStream(stream, facing) {
   readCapabilities();
   const t = videoTrack();
   // R-24: the camera stopped -> pause.
-  if (t) t.addEventListener('ended', () => rec && rec.pause('The camera stopped. Recording paused.'));
+  if (t) t.addEventListener('ended', () => rec && S.source === 'camera' && rec.pause('The camera stopped. Recording paused.'));
   hideGate();
   refreshUI();
   countCameras();
@@ -309,7 +317,7 @@ function nudgeExposure(dy) {
   let start = null, moved = false, longFired = false, longId = 0, lastY = 0;
 
   el.frame.addEventListener('pointerdown', (e) => {
-    if (!S.hasVideo) return;
+    if (!S.hasVideo || S.source !== 'camera') return;
     start = { x: e.clientX, y: e.clientY };
     moved = false;
     longFired = false;
@@ -366,6 +374,9 @@ let pillTimer = 0;
 
 function onState(st) {
   el.body.setAttribute('data-state', st);
+  // Plan §11.5 step 5: the file pauses with the recording.
+  if (st !== ST.RECORDING && !el.fileVideo.paused) el.fileVideo.pause();
+  if (S.source === 'file') updateFileBar();
   // The time in the pill changes only while recording. No timer runs in the other states.
   const ticking = st === ST.RECORDING || st === ST.PAUSING;
   if (ticking && !pillTimer) pillTimer = setInterval(updatePill, 250);
@@ -438,26 +449,124 @@ async function shutter() {
   const st = rec.state;
   if (st === ST.RECORDING) return rec.pause();
   if (st !== ST.IDLE && st !== ST.PAUSED) return;
-  if (!S.hasVideo || !el.preview.videoWidth) {
-    toast('The camera is not ready.');
+  if (!sourceReady()) {
+    toast(S.source === 'file' ? 'The video file is not ready.' : 'The camera is not ready.');
+    return;
+  }
+  const fv = el.fileVideo;
+  if (S.source === 'file' && (fv.ended || fv.currentTime >= fv.duration - 0.05)) {
+    toast('The file is at its end. Move the file position back.');
     return;
   }
   const { w, h } = pictureSize();
   el.shutter.disabled = true;
   try {
+    rec.setSource(activeVideo(), S.source);
     await rec.record({ w, h, fps: S.fps, aspect: S.aspect, orient: isPortrait() ? 'v' : 'h', mirror: mirrored() });
+    // Plan §11.5 step 4: the file plays at normal speed (R-32).
+    if (S.source === 'file' && rec.state === ST.RECORDING) {
+      await fv.play().catch(() => rec.pause('The video file did not play.'));
+    }
   } catch (e) {
     toast('The recording did not start: ' + (e && e.message));
   }
   refreshUI();
 }
 
+/* ---------------- file source (plan §11.5) ---------------- */
+
+function setSource(kind) {
+  const st = state();
+  if (st !== ST.IDLE && st !== ST.PAUSED) return;
+  S.source = kind;
+  el.body.setAttribute('data-source', kind);
+  clearFocus();
+  if (kind === 'camera') {
+    el.fileVideo.pause();
+    // The camera stream stayed open (step 7). Only its display was paused.
+    const p = el.preview.play();
+    if (p && p.catch) p.catch(() => {});
+  } else el.preview.pause();
+  if (rec) rec.setSource(activeVideo(), kind);
+  updateFileBar();
+  refreshUI();
+  layoutFrame();
+}
+
+async function openFile(file) {
+  el.fileInput.value = '';
+  if (!file) return;
+  const v = el.fileVideo;
+  const url = URL.createObjectURL(file);
+  const ok = await new Promise((resolve) => {
+    v.onloadeddata = () => resolve(true);
+    v.onerror = () => resolve(false);
+    v.src = url;
+    v.load();
+  });
+  v.onloadeddata = v.onerror = null;
+  if (!ok || !v.videoWidth) {
+    URL.revokeObjectURL(url);
+    toast('This video file did not open. Try an MP4 or a MOV file.');
+    if (S.fileUrl) v.src = S.fileUrl;
+    return;
+  }
+  if (S.fileUrl) URL.revokeObjectURL(S.fileUrl);
+  S.fileUrl = url;
+  v.pause();
+  hideGate();
+  setSource('file');
+  toast(file.name);
+}
+
+function updateFileBar() {
+  const v = el.fileVideo;
+  const d = v.duration || 0;
+  if (!fileScrubbing && d) el.fileScrub.value = Math.round((1000 * v.currentTime) / d);
+  el.fileTime.textContent = `${formatTime(v.currentTime * 1e6)} / ${formatTime(d * 1e6)}`;
+}
+
+let fileScrubbing = false;
+el.fileScrub.addEventListener('input', () => {
+  const v = el.fileVideo;
+  if (!v.duration || state() === ST.RECORDING) return;
+  fileScrubbing = true;
+  v.currentTime = (Number(el.fileScrub.value) / 1000) * v.duration;
+  updateFileBar();
+});
+el.fileScrub.addEventListener('change', () => (fileScrubbing = false));
+el.fileVideo.addEventListener('seeked', updateFileBar);
+el.fileVideo.addEventListener('loadedmetadata', updateFileBar);
+// Step 6: the end of the file pauses the recording.
+el.fileVideo.addEventListener('ended', () => {
+  if (rec && rec.state === ST.RECORDING && S.source === 'file') rec.pause('The file ended.');
+  updateFileBar();
+});
+el.srcCamera.addEventListener('click', () => {
+  if (!S.hasVideo) {
+    toast('The camera is not available.');
+    return;
+  }
+  setSource('camera');
+});
+el.srcFile.addEventListener('click', () => {
+  const st = state();
+  if (st !== ST.IDLE && st !== ST.PAUSED) return;
+  // A second touch on FILE (or no file yet) selects a file.
+  if (S.source === 'file' || !S.fileUrl) el.fileInput.click();
+  else setSource('file');
+});
+el.fileInput.addEventListener('change', () => openFile(el.fileInput.files && el.fileInput.files[0]));
+
 function refreshUI() {
   const st = state();
   const idleOrPaused = st === ST.IDLE || st === ST.PAUSED;
-  el.shutter.disabled = !S.hasVideo || !(idleOrPaused || st === ST.RECORDING);
+  el.shutter.disabled = !(S.source === 'file' ? !!S.fileUrl : S.hasVideo) || !(idleOrPaused || st === ST.RECORDING);
+  el.srcCamera.disabled = el.srcFile.disabled = !idleOrPaused;
+  el.srcCamera.classList.toggle('active', S.source === 'camera');
+  el.srcFile.classList.toggle('active', S.source === 'file');
   el.shutter.setAttribute('aria-label', st === ST.RECORDING ? 'Pause' : st === ST.PAUSED ? 'Resume' : 'Record');
-  el.flip.disabled = !S.hasVideo || !S.multiCam || !idleOrPaused;
+  el.flip.disabled = !S.hasVideo || !S.multiCam || !idleOrPaused || S.source !== 'camera';
   const locked = sessionLocked() || !idleOrPaused;
   el.orientBtn.disabled = locked;
   el.ratios.forEach((b) => (b.disabled = locked));
@@ -752,9 +861,11 @@ el.exportShare.addEventListener('click', () => {
 
 /* ---------------- gate ---------------- */
 
-function showGate(title, text) {
+// allowFile: show "Use a video file" (no camera: the file source still works, plan §4).
+function showGate(title, text, allowFile = false) {
   el.gateTitle.textContent = title;
   el.gateText.textContent = text;
+  el.gateFile.hidden = !allowFile;
   el.gateBtn.disabled = el.gateNew.disabled = false;
   el.gate.classList.add('show');
 }
@@ -801,7 +912,7 @@ async function start(fresh) {
       on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
     });
   }
-  if (!(await startStream(S.facing))) return;
+  await startStream(S.facing); // without a camera, the gate offers a video file
   if (restoreSession) {
     const s = restoreSession;
     restoreSession = null;
@@ -821,6 +932,7 @@ async function start(fresh) {
 
 el.gateBtn.addEventListener('click', () => start(false));
 el.gateNew.addEventListener('click', () => start(true));
+el.gateFile.addEventListener('click', () => el.fileInput.click());
 el.shutter.addEventListener('click', shutter);
 el.flip.addEventListener('click', flipCamera);
 el.ratios.forEach((b) => b.addEventListener('click', () => setAspect(b.dataset.a)));

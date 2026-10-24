@@ -28,6 +28,7 @@ export class Recorder {
     this.workerSrc = workerSrc;
     this.store = store;
     this.video = video;
+    this.source = 'camera'; // 'camera' or 'file' (plan §11.5). The encoder cannot tell (R-31).
     this.on = on || {};
     this.state = ST.IDLE;
     this.settings = { ...DEFAULT_SETTINGS };
@@ -119,6 +120,13 @@ export class Recorder {
     }
   }
 
+  // The source <video> for the next clip (IDLE or PAUSED only).
+  setSource(video, kind) {
+    if (this.state === ST.RECORDING || this.state === ST.PAUSING) return;
+    this.video = video;
+    this.source = kind;
+  }
+
   // Record (from IDLE with a new session) or resume (from PAUSED).
   async record(opts) {
     if (this.state === ST.IDLE) await this.newSession(opts);
@@ -144,8 +152,10 @@ export class Recorder {
       if (this.state !== ST.RECORDING) return;
       if (useVfc) v.requestVideoFrameCallback(tick);
       else requestAnimationFrame(tick);
-      // R-17: frame time of the camera.
-      const t = meta ? meta.captureTime ?? meta.expectedDisplayTime ?? now : performance.now();
+      // R-17: frame time. A file: the media time. The camera: the capture time.
+      let t;
+      if (this.source === 'file') t = (meta ? meta.mediaTime : v.currentTime) * 1000;
+      else t = meta ? meta.captureTime ?? meta.expectedDisplayTime ?? now : performance.now();
       this.capture(t);
     };
     if (useVfc) v.requestVideoFrameCallback(tick);

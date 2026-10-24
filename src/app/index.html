@@ -12,7 +12,7 @@
 <title>neomosh</title>
 <!--@css:style.css-->
 </head>
-<body data-state="gate" data-lock="0" data-preview="1" data-pulse="0">
+<body data-source="camera" data-state="gate" data-lock="0" data-preview="1" data-pulse="0">
 <div id="app">
 
   <div id="topBar">
@@ -49,6 +49,7 @@
   <div id="stage">
     <div id="frame">
       <video id="preview" playsinline autoplay muted></video>
+      <video id="fileVideo" playsinline muted preload="auto"></video>
       <canvas id="mosh"></canvas>
       <canvas id="overlay"></canvas>
       <div id="focusBox">
@@ -61,10 +62,17 @@
     <div id="toast"></div>
   </div>
 
+  <div id="fileBar">
+    <span class="lbl">File</span>
+    <input id="fileScrub" type="range" min="0" max="1000" step="1" value="0" aria-label="File position">
+    <span id="fileTime">00:00 / 00:00</span>
+  </div>
+
   <div id="bottomBar">
     <div id="modes">
       <button class="mode active" id="srcCamera" type="button">Camera</button>
-      <button class="mode" id="srcFile" type="button" disabled>File</button>
+      <button class="mode" id="srcFile" type="button">File</button>
+      <input id="fileInput" type="file" accept="video/*" hidden>
     </div>
     <div id="controls">
       <button id="thumbBtn" type="button" aria-label="History"><img id="thumbImg" alt=""></button>
@@ -80,6 +88,7 @@
     <p id="gateText">This app records a datamosh video. It needs the camera. Touch the button and give permission.</p>
     <button id="gateBtn" type="button">Start</button>
     <button id="gateNew" type="button" hidden>Start new</button>
+    <button id="gateFile" type="button" hidden>Use a video file</button>
     <p class="ver">v@VERSION@</p>
   </div>
 
