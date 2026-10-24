@@ -52,6 +52,7 @@ Main flow:
 | D15 | Video file source: at the start or at any pause point. The encoder does not know the source. |
 | D16 | No reference clip for the look at this time. Default settings give a "classic" mosh. |
 | D17 | 720 size: all frame rates stay available. When the selected rate is more than the device can hold, the settings panel shows a hint (§7.1). The app does not change the rate (R-20). |
+| D18 | No `navigator.storage.persist()` request: some browsers show a permission prompt for it. The app uses best-effort storage, writes often, and warns when free storage is low (R-26). |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -391,7 +392,7 @@ PAUSED ──► REVIEW (player, history) ──► PAUSED
 
 - **R-24** Page hidden (`visibilitychange`), camera track ended, or file ended → pause (not stop). Show a toast.
 - **R-25** Request a wake lock while recording.
-- **R-26** Call `navigator.storage.persist()` at the first recording. Warn when free storage is below 200 MB.
+- **R-26** Warn when free storage is below 200 MB. Do not call `navigator.storage.persist()` (D18).
 
 ---
 
@@ -704,7 +705,7 @@ Done when: all §13.1 and §13.2 tests pass, and Ryan has run the benchmark on h
 | CAVLC or MV prediction error | FFmpeg errors, or output differs | Phase 1 step-by-step FFmpeg bit-exact tests |
 | Encoder too slow on a phone | Drops, jumpy motion | Benchmark first, drop badge, smaller presets |
 | Encoder/decoder mismatch | Noise that is not mosh | Shared reconstruction code (R-11), test 13.1 #4 |
-| iOS storage limits or eviction | Lost session | `storage.persist()`, warnings, frequent writes |
+| iOS storage limits or eviction | Lost session | Warnings, frequent writes (no `storage.persist()`, D18) |
 | No AAC encoder | No audio | Badge, video-only export |
 | One sync frame | Slow seeking in long files | README note; Clean cuts add sync frames |
 | Large I_PCM frames above level bitrate | A strict decoder could complain | Tested in §13.4; v2 can use Intra 16×16 |

@@ -3235,9 +3235,8 @@ class Recorder {
     // Point 0 = the start (plan §12): frameIndex 0, no reference.
     await this.putPoint({ n: 0, frameIndex: 0, tsUs: 0, drops: 0, thumb: null, refY: null, refU: null, refV: null });
     await this.startWorkers(w, h);
-    // R-26: ask for persistent storage, and warn when free storage is low.
+    // R-26 (D18): warn when free storage is low. No persistent storage request (it can show a prompt).
     try {
-      if (navigator.storage && navigator.storage.persist) await navigator.storage.persist();
       const e = await navigator.storage.estimate();
       if (e.quota - e.usage < 200e6 && this.on.toast) this.on.toast('Free storage is low (less than 200 MB).');
     } catch {
