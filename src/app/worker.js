@@ -67,7 +67,7 @@ function encodeRgba(m) {
 // Two ways to crop and scale a camera frame. 'bitmap': createImageBitmap with resize (the GPU on
 // most phones), then read the small picture. 'draw': draw the full frame on the canvas. The fastest
 // depends on the device, so the worker measures both on the first frames and keeps the faster one.
-const CAP_WARM = 8, CAP_TRIAL = 12;
+const CAP_WARM = 5, CAP_TRIAL = 6; // short: the slower way can lose frames during its trial
 function capMethod() {
   if (cap.method) return cap.method;
   const n = cap.trial.bitmap.length + cap.trial.draw.length + cap.warm;
@@ -87,6 +87,15 @@ function capTimed(method, ms) {
   }
 }
 
+// After a stop: cancel the stream when no frame came for 300 ms. Then no frame is in its queue
+// (a cancel drops the queued frames without close()).
+function armQuietCancel(reader) {
+  clearTimeout(cap.quietTimer);
+  cap.quietTimer = setTimeout(() => {
+    if (cap.reader === reader) reader.cancel().catch(() => {});
+  }, 300);
+}
+
 // One clip from the camera. m: { readable | track, fps, mirror, sessionEndUs, seq, vw, vh }.
 async function captureClip(m, run) {
   // A short buffer absorbs short delays of this worker (the camera keeps its pool of frames).
@@ -99,10 +108,13 @@ async function captureClip(m, run) {
   let start = null, sent = 0, seq = m.seq, checked = false;
   try {
     for (;;) {
+      const tr = performance.now();
       const { value: frame, done } = await reader.read();
+      const waited = performance.now() - tr;
       if (done) break;
       if (run !== cap.run) {
         frame.close(); // stopped: close the queued frames until the stream ends
+        armQuietCancel(reader);
         continue;
       }
       const fw = frame.displayWidth, fh = frame.displayHeight;
@@ -116,7 +128,13 @@ async function captureClip(m, run) {
         }
       }
       const t = frame.timestamp / 1000;
-      const g = gate.next(t, gaps.next(t));
+      // A gap in the source times: when this worker waited for the frame, the camera did not give the
+      // missing frames (R-19: not a drop). When the frame was ready at once, the processor dropped
+      // frames because this worker was late: a drop.
+      const missed = gaps.next(t);
+      const late = missed > 0 && waited < 3;
+      if (missed > 0 && !late) self.postMessage({ cmd: 'capSkip', n: missed });
+      const g = gate.next(t, late ? missed : 0);
       if (g.lost) self.postMessage({ cmd: 'capDrop', n: g.lost, kind: 'cap' });
       if (!g.keep) {
         frame.close();
@@ -156,6 +174,7 @@ async function captureClip(m, run) {
       cap.port.postMessage({ cmd: 'rgba', rgba, tsUs, seq: seq++, grabMs: performance.now() - t0 }, [rgba.buffer]);
     }
   } finally {
+    clearTimeout(cap.quietTimer);
     if (cap.reader === reader) cap.reader = null;
     reader.cancel().catch(() => {});
     if (m.track) m.track.stop();
@@ -217,10 +236,7 @@ const handlers = {
   capStop() {
     cap.run++;
     if (cap.track) cap.track.stop();
-    const reader = cap.reader;
-    setTimeout(() => {
-      if (reader && cap.reader === reader) reader.cancel().catch(() => {});
-    }, 500);
+    if (cap.reader) armQuietCancel(cap.reader);
   },
 
   newClip() {
