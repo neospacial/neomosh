@@ -99,6 +99,13 @@ export class Encoder {
     if (this.hasRef) this.nextType = 'hiddenI';
   }
 
+  // Plan §12.3 and §11.6: continue a session that has frames (after a revert, or in a new worker
+  // after a restore). The next frame is a hidden I-frame, which makes a new reference.
+  continueSession() {
+    this.nextType = 'hiddenI';
+    this.hasRef = true;
+  }
+
   // Plan §12.3, revert to point 0: the next frame is the IDR.
   restart() {
     this.nextType = 'idr';

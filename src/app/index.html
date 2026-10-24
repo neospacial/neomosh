@@ -79,6 +79,7 @@
     <h1 id="gateTitle">neomosh</h1>
     <p id="gateText">This app records a datamosh video. It needs the camera. Touch the button and give permission.</p>
     <button id="gateBtn" type="button">Start</button>
+    <button id="gateNew" type="button" hidden>Start new</button>
     <p class="ver">v@VERSION@</p>
   </div>
 
@@ -96,6 +97,22 @@
       <div class="row"><span>Mirror front camera</span><div class="seg" data-key="mirror"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
     </div>
     <div class="group info" id="info"></div>
+  </section>
+
+  <section id="reviewSheet" class="sheet" aria-label="History">
+    <header><h2>History</h2><button class="done" type="button" data-close>Close</button></header>
+    <div id="playerBox"><canvas id="player"></canvas></div>
+    <div id="playerBar">
+      <button id="playBtn" type="button" aria-label="Play">
+        <svg class="ic-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l13-7.5z"/></svg>
+        <svg class="ic-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h4.5v16H6zM13.5 4H18v16h-4.5z"/></svg>
+      </button>
+      <input id="scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Position">
+      <span id="playTime">00:00</span>
+    </div>
+    <p class="hint">Touch a pause point to go back to it.</p>
+    <div id="cards"></div>
+    <div class="actions"><button id="newVideo" class="danger" type="button">New video</button></div>
   </section>
 
   <section id="exportSheet" class="sheet" aria-label="Export">
@@ -117,11 +134,19 @@
     </div>
   </section>
 
+  <div id="confirm" role="dialog" aria-modal="true">
+    <div class="box">
+      <h3 id="confirmTitle"></h3>
+      <p id="confirmText"></p>
+      <div class="actions"><button id="confirmNo" type="button">Cancel</button><button id="confirmYes" class="danger" type="button"></button></div>
+    </div>
+  </div>
+
 </div>
 <script>
 const VERSION = '@VERSION@';
 const WORKER_SRC = "@WORKER:codec,app/worker.js";
 </script>
-<!--@modules:codec,mux/mp4.js,mux/remux.js,app/geometry.js,app/store.js,app/recorder.js,app/main.js-->
+<!--@modules:codec,mux/mp4.js,mux/remux.js,app/geometry.js,app/store.js,app/recorder.js,app/player.js,app/main.js-->
 </body>
 </html>

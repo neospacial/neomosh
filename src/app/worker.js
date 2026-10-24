@@ -74,6 +74,9 @@ const handlers = {
   restart() {
     enc.restart();
   },
+  continueSession() {
+    enc.continueSession();
+  },
   settings(m) {
     enc.setSettings(m.settings);
   },

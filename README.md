@@ -4,7 +4,7 @@ neomosh is a video recorder in one standalone HTML file. It makes a **true datam
 
 The exported file is a valid H.264 (Constrained Baseline) stream. Each conforming player shows the same moshed pictures.
 
-> Status: development. Phases 1 to 3 are done: codec, MP4 export, and the recorder. History and undo, the file source, audio, and the full settings panel come in Phases 4 to 7.
+> Status: development. Phases 1 to 4 are done: codec, MP4 export, recorder, and history. The file source, audio, and the full settings panel come in Phases 5 to 7. See `neomosh-plan-v0.1.0.md`.
 
 ## How to use
 
@@ -14,11 +14,12 @@ The exported file is a valid H.264 (Constrained Baseline) stream. Each conformin
 4. Touch the button again to pause. The last picture shows above the live camera. Move the **Guide** slider to change its opacity, and align the next shot.
 5. Touch the red button to resume. The new clip has no keyframe, so its motion moves the old picture. This is the datamosh. The mosh needs movement: if nothing moves, the old picture stays frozen.
 6. Repeat steps 4 and 5 as many times as necessary.
-7. Touch **Export** (top right). For each cut, select **Mosh** or **Clean**. Touch **Export**, then **Save Video** (iOS) or **Download**.
+7. To go back, touch the thumbnail (bottom left) while paused. The **History** sheet plays the video and shows one card for each pause point. Touch a card, then **Revert**, to delete all clips after that point and continue from it. **Start** deletes all clips. **New video** deletes the video.
+8. Touch **Export** (top right). For each cut, select **Mosh** or **Clean**. Touch **Export**, then **Save Video** (iOS) or **Download**.
 
 The gear (top left) sets the size and the frame rate before the first recording, and turns the mosh preview and the front-camera mirror on or off. An amber badge shows the count of frames that the encoder dropped. Touch it for help.
 
-The app keeps the video in the browser storage (IndexedDB) until you start a new video. See `neomosh-plan-v0.1.0.md`.
+The app keeps the video in the browser storage (IndexedDB). When you open the app again, touch **Continue last video** to continue from the last pause point, or **Start new**. If the app closed during a recording, it keeps the frames that were stored (all but about the last second) and makes a new pause point.
 
 ## Development
 

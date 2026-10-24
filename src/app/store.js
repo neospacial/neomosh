@@ -91,6 +91,27 @@ export class Store {
     return this.flushing;
   }
 
+  async countFrames(id) {
+    const tx = this.db.transaction('frames');
+    return req(tx.objectStore('frames').count(range(id)));
+  }
+
+  // Plan §12.3 steps 1 and 2: delete the frames from frameIndex and the points after n.
+  // (Step 3, the audio, comes with the audio in Phase 6.)
+  async truncate(id, frameIndex, n) {
+    this.pending = this.pending.filter((f) => f.index < frameIndex);
+    await this.flush();
+    const tx = this.db.transaction(['frames', 'points'], 'readwrite');
+    tx.objectStore('frames').delete(range(id, frameIndex));
+    tx.objectStore('points').delete(range(id, n + 1));
+    return done(tx);
+  }
+
+  async getPoint(id, n) {
+    const tx = this.db.transaction('points');
+    return req(tx.objectStore('points').get([id, n]));
+  }
+
   async putPoint(p) {
     const tx = this.db.transaction('points', 'readwrite');
     tx.objectStore('points').put(p);

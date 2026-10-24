@@ -10,6 +10,7 @@ export const ST = {
   PAUSING: 'pausing',
   PAUSED: 'paused',
   EXPORTING: 'exporting',
+  REVIEW: 'review',
 };
 
 const MAX_IN_FLIGHT = 2; // R-18
@@ -40,7 +41,8 @@ export class Recorder {
     this.frameCount = 0; // frames stored for this session
     this.clip = 0;
     this.cuts = []; // frame index of each hidden I-frame
-    this.points = 0;
+    this.points = 0; // number of the last pause point
+    this.pointList = []; // pause point meta in RAM: { n, frameIndex, tsUs, drops, thumb }
     this.sessionEndUs = 0; // end of the previous clips
     this.lastTsUs = 0;
     this.encInFlight = 0;
@@ -104,6 +106,8 @@ export class Recorder {
     };
     await this.store.putSession(this.session);
     this.reset();
+    // Point 0 = the start (plan §12): frameIndex 0, no reference.
+    await this.putPoint({ n: 0, frameIndex: 0, tsUs: 0, drops: 0, thumb: null, refY: null, refU: null, refV: null });
     await this.startWorkers(w, h);
     // R-26: ask for persistent storage, and warn when free storage is low.
     try {
@@ -269,25 +273,145 @@ export class Recorder {
       this.setState(ST.IDLE);
       return;
     }
-    if (this.clipFrames) this.sessionEndUs = this.lastTsUs + Math.round(1e6 / this.params.fps);
-    // Step 4: the reference picture and a thumbnail.
-    const snap = await new Promise((resolve) => {
-      this.snapWaiter = resolve;
-      this.dec.postMessage({ cmd: 'snapshot', id: this.points });
-    });
-    this.snapWaiter = null;
+    if (!this.clipFrames) {
+      // No frame in this clip: no new pause point. The overlay stays.
+      this.clip--;
+      this.setState(ST.PAUSED);
+      if (this.on.paused) this.on.paused(null, null);
+      return;
+    }
+    this.sessionEndUs = this.lastTsUs + Math.round(1e6 / this.params.fps);
+    await this.makePoint(this.clipDrops);
+  }
+
+  // Plan §8.4 steps 4, 6, and 7: a pause point at the current end of the session.
+  async makePoint(drops) {
+    const snap = await this.snapshot();
     const thumb = await makeThumb(snap.bitmap);
-    // Step 6: the pause point.
-    this.points++;
     await this.store.flush();
-    await this.store.putPoint({
-      sessionId: this.session.id, n: this.points, frameIndex: this.frameCount, tsUs: this.sessionEndUs,
-      audioSamples: 0, refY: snap.Y, refU: snap.U, refV: snap.V, thumb, settings: { ...this.settings },
-      drops: this.clipDrops,
+    await this.putPoint({
+      n: this.points + 1, frameIndex: this.frameCount, tsUs: this.sessionEndUs, drops, thumb,
+      refY: snap.Y, refU: snap.U, refV: snap.V,
     });
-    this.setState(ST.PAUSED);
-    // Step 7: the overlay.
     if (this.on.paused) this.on.paused(snap.bitmap, thumb);
+    this.setState(ST.PAUSED);
+  }
+
+  async putPoint(p) {
+    const point = { sessionId: this.session.id, audioSamples: 0, settings: { ...this.settings }, ...p };
+    await this.store.putPoint(point);
+    this.points = p.n;
+    this.pointList[p.n] = { n: p.n, frameIndex: p.frameIndex, tsUs: p.tsUs, drops: p.drops, thumb: p.thumb, settings: point.settings };
+  }
+
+  // The decoder reference picture: { Y, U, V, bitmap }.
+  snapshot() {
+    return new Promise((resolve) => {
+      this.snapWaiter = (m) => {
+        this.snapWaiter = null;
+        resolve(m);
+      };
+      this.dec.postMessage({ cmd: 'snapshot' });
+    });
+  }
+
+  // Wait until the decoder has decoded all packets that were sent to it.
+  decIdle() {
+    return new Promise((resolve) => {
+      this.idleWaiter = resolve;
+      this.checkIdle();
+    });
+  }
+
+  // Plan §12.3: revert to pause point n. Then PAUSED at that point, or IDLE for n = 0.
+  async revert(n) {
+    if ((this.state !== ST.PAUSED && this.state !== ST.REVIEW) || !this.session) return;
+    if (n === 0) return this.discard();
+    this.setState(ST.PAUSING); // busy until the overlay shows point n
+    const p = await this.store.getPoint(this.session.id, n);
+    if (!p || !p.refY) {
+      this.setState(ST.PAUSED);
+      throw new Error(`No pause point ${n}`);
+    }
+    await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 to 3
+    this.dec.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV }); // step 4
+    this.settings = { ...p.settings }; // step 6
+    this.enc.postMessage({ cmd: 'settings', settings: this.settings });
+    this.enc.postMessage({ cmd: 'continueSession' }); // step 5
+    this.pointList.length = n + 1;
+    this.applyPoint(p);
+    const snap = await this.snapshot();
+    if (this.on.paused) this.on.paused(snap.bitmap, p.thumb);
+    this.setState(ST.PAUSED);
+  }
+
+  // RAM state at pause point p (the last point of the session).
+  applyPoint(p) {
+    this.points = p.n;
+    this.frameCount = p.frameIndex;
+    this.clip = p.n;
+    this.sessionEndUs = p.tsUs;
+    this.lastTsUs = p.tsUs;
+    // Each clip after the first starts with a hidden I-frame at its pause point.
+    this.cuts = this.pointList.filter((q) => q && q.n >= 1 && q.frameIndex < this.frameCount).map((q) => q.frameIndex);
+    this.drops = this.pointList.reduce((a, q) => a + (q ? q.drops : 0), 0);
+    this.clipDrops = 0;
+  }
+
+  // Plan §11.4 "New video" (and revert to point 0): delete the session. Then IDLE.
+  async discard() {
+    this.setState(ST.PAUSING);
+    if (this.session) await this.store.deleteSession(this.session.id);
+    this.stopWorkers();
+    this.session = null;
+    this.reset();
+    this.setState(ST.IDLE);
+  }
+
+  // Plan §11.6: continue a stored session. Returns false when it has no frames.
+  async restore(session) {
+    this.session = session;
+    this.params = streamParams(session.w, session.h, session.fps);
+    this.reset();
+    const id = session.id;
+    const pts = (await this.store.getPoints(id)).sort((a, b) => a.n - b.n);
+    const total = await this.store.countFrames(id);
+    if (!total) {
+      await this.discard();
+      return false;
+    }
+    if (!pts.length || pts[0].n !== 0) pts.unshift({ n: 0, frameIndex: 0, tsUs: 0, drops: 0, thumb: null });
+    for (const q of pts) this.pointList[q.n] = { n: q.n, frameIndex: q.frameIndex, tsUs: q.tsUs, drops: q.drops || 0, thumb: q.thumb, settings: q.settings };
+    let last = pts[pts.length - 1];
+    if (last.settings) this.settings = { ...last.settings };
+    await this.startWorkers(session.w, session.h);
+    if (last.refY) this.dec.postMessage({ cmd: 'setRef', Y: last.refY, U: last.refU, V: last.refV });
+    this.applyPoint(last);
+    this.setState(ST.PAUSING);
+    if (total > last.frameIndex) {
+      // The app closed while recording: decode the frames after the last point, then make a point.
+      let lastTs = last.tsUs;
+      for await (const f of this.store.readFrames(id, last.frameIndex)) {
+        if (f.type === 'hiddenI' && f.index > last.frameIndex) this.cuts.push(f.index);
+        this.decInFlight++;
+        this.dec.postMessage({ cmd: 'packet', seq: f.index, pkt: f, preview: false });
+        lastTs = f.tsUs;
+        if (f.settings) this.settings = { ...f.settings };
+      }
+      await this.decIdle();
+      if (last.n >= 1 && last.frameIndex < total) this.cuts = [...new Set([...this.cuts, last.frameIndex])].sort((a, b) => a - b);
+      this.frameCount = total;
+      this.clip = last.n + 1;
+      this.sessionEndUs = this.lastTsUs = lastTs + Math.round(1e6 / session.fps);
+      await this.makePoint(0);
+    } else {
+      const snap = await this.snapshot();
+      if (this.on.paused) this.on.paused(snap.bitmap, last.thumb);
+      this.setState(ST.PAUSED);
+    }
+    this.enc.postMessage({ cmd: 'settings', settings: this.settings });
+    this.enc.postMessage({ cmd: 'continueSession' });
+    return true;
   }
 
   fail(msg) {

@@ -9,7 +9,7 @@
   --row:#2c2c2e;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-html,body{height:100%;margin:0;background:#000;overflow:hidden;overscroll-behavior:none}
+html,body{height:100%;margin:0;background:#000;overflow:hidden;overflow:clip;overscroll-behavior:none}
 body{
   font:500 14px/1.2 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
   color:#fff;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
@@ -18,8 +18,9 @@ button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:poin
 button:focus-visible{outline:2px solid var(--ios-yellow);outline-offset:3px;border-radius:6px}
 button[disabled]{cursor:default}
 
+/* overflow:clip: the closed sheets below the screen must not make #app scroll (focus, scrollIntoView). */
 #app{
-  position:relative;height:100%;display:flex;flex-direction:column;
+  position:relative;height:100%;display:flex;flex-direction:column;overflow:hidden;overflow:clip;
   padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
@@ -171,7 +172,9 @@ body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;h
 #gate p{margin:0;max-width:34ch;font-size:14px;font-weight:400;line-height:1.45;color:#aeaeb2}
 #gate .ver{font-size:12px;color:#636366}
 #gateBtn{margin-top:6px;background:var(--ios-yellow);color:#000;font-weight:600;font-size:16px;padding:12px 26px;border-radius:24px}
-#gateBtn[disabled]{opacity:.5}
+#gateBtn[disabled],#gateNew[disabled]{opacity:.5}
+#gateNew{color:var(--ios-yellow);font-weight:600;font-size:15px;padding:8px 16px}
+#gateNew[hidden]{display:none}
 
 /* ---------- sheets ---------- */
 #sheetBack{position:absolute;inset:0;z-index:20;background:rgba(0,0,0,.45);display:none}
@@ -180,9 +183,10 @@ body[data-sheet] #sheetBack{display:block}
   position:absolute;left:0;right:0;bottom:0;z-index:21;max-height:88%;overflow-y:auto;
   background:var(--sheet);border-radius:14px 14px 0 0;
   padding:0 16px calc(16px + env(safe-area-inset-bottom));
-  transform:translateY(105%);transition:transform .25s ease;
+  transform:translateY(105%);visibility:hidden;transition:transform .25s ease,visibility 0s linear .25s;
 }
-body[data-sheet="settings"] #settingsSheet,body[data-sheet="export"] #exportSheet{transform:none}
+body[data-sheet="settings"] #settingsSheet,body[data-sheet="export"] #exportSheet,body[data-sheet="review"] #reviewSheet{transform:none;visibility:visible;transition:transform .25s ease}
+#reviewSheet{max-height:100%;height:100%;border-radius:0;padding-top:env(safe-area-inset-top)}
 .sheet header{display:flex;align-items:center;justify-content:space-between;height:52px;position:sticky;top:0;background:var(--sheet)}
 .sheet h2{margin:0;font-size:17px;font-weight:600}
 .sheet .done{color:var(--ios-yellow);font-weight:600;font-size:15px}
@@ -206,6 +210,30 @@ body[data-sheet="settings"] #settingsSheet,body[data-sheet="export"] #exportShee
 .actions button{flex:1 1 40%;padding:11px 14px;border-radius:12px;background:rgba(255,255,255,.12);font-weight:600;font-size:15px}
 .actions button.primary{background:var(--ios-yellow);color:#000}
 .actions button[hidden]{display:none}
+
+/* ---------- review (plan §11.4) ---------- */
+#playerBox{display:flex;justify-content:center;background:#000;border-radius:10px;overflow:hidden}
+#player{display:block;max-width:100%;max-height:44vh;background:#000}
+#playerBar{display:flex;align-items:center;gap:12px;padding:10px 4px}
+#playBtn{width:36px;height:36px;display:grid;place-items:center}
+#playBtn svg{width:24px;height:24px;fill:#fff}
+#playBtn .ic-pause{display:none}
+body[data-playing="1"] #playBtn .ic-play{display:none}
+body[data-playing="1"] #playBtn .ic-pause{display:block}
+#playTime{font-size:13px;font-variant-numeric:tabular-nums;color:#aeaeb2;min-width:84px;text-align:right}
+#cards{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 12px;scroll-snap-type:x proximity}
+.card{flex:0 0 auto;width:96px;scroll-snap-align:start;text-align:left;border-radius:9px;padding:0 0 6px;background:var(--row)}
+.card .pic{width:96px;height:72px;border-radius:9px 9px 0 0;background:#111 center/cover no-repeat;display:grid;place-items:center;color:#636366;font-size:12px}
+.card b{display:block;font-size:12px;padding:6px 7px 1px}
+.card small{display:block;font-size:11px;font-weight:400;color:#8e8e93;padding:0 7px}
+.card small.warn{color:var(--ios-amber)}
+.card.now{box-shadow:inset 0 0 0 2px var(--ios-yellow)}
+.actions button.danger,#confirm button.danger{color:var(--ios-red)}
+#confirm{position:absolute;inset:0;z-index:30;background:rgba(0,0,0,.55);display:none;align-items:flex-end;justify-content:center;padding:16px calc(16px + env(safe-area-inset-bottom))}
+body[data-confirm="1"] #confirm{display:flex}
+#confirm .box{width:100%;max-width:420px;background:var(--sheet);border-radius:14px;padding:18px 16px 8px}
+#confirm h3{margin:0 0 6px;font-size:17px}
+#confirm p{margin:0 0 10px;font-size:14px;font-weight:400;line-height:1.45;color:#aeaeb2}
 
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms !important;transition-duration:.01ms !important}

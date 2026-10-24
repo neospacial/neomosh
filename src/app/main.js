@@ -5,6 +5,7 @@ import { remuxOriginal } from '../mux/remux.js';
 import { sessionSize, fileStamp, formatTime } from './geometry.js';
 import { Store } from './store.js';
 import { Recorder, ST } from './recorder.js';
+import { Player } from './player.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -15,7 +16,10 @@ const el = {
   orientBtn: $('orientBtn'), ratios: [...document.querySelectorAll('.ratio')],
   focusBox: $('focusBox'), expoSun: $('expoSun'),
   gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'), micBadge: $('micBadge'),
-  gate: $('gate'), gateTitle: $('gateTitle'), gateText: $('gateText'), gateBtn: $('gateBtn'),
+  gate: $('gate'), gateTitle: $('gateTitle'), gateText: $('gateText'), gateBtn: $('gateBtn'), gateNew: $('gateNew'),
+  player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
+  newVideo: $('newVideo'), confirmTitle: $('confirmTitle'), confirmText: $('confirmText'),
+  confirmYes: $('confirmYes'), confirmNo: $('confirmNo'),
   sheetBack: $('sheetBack'), info: $('info'), lockHint: $('lockHint'),
   cutList: $('cutList'), allCuts: $('allCuts'), progress: $('progress').firstElementChild, exportMsg: $('exportMsg'),
   exportGo: $('exportGo'), exportCancel: $('exportCancel'), exportShare: $('exportShare'), exportDownload: $('exportDownload'),
@@ -56,6 +60,8 @@ function savePrefs() {
 
 let store = null;
 let rec = null;
+let player = null;
+let restoreSession = null; // a stored session for "Continue last video" (plan §11.6)
 
 /* ---------------- helpers ---------------- */
 
@@ -359,6 +365,10 @@ function nudgeExposure(dy) {
 function onState(st) {
   el.body.setAttribute('data-state', st);
   if (rec && !rec.drops) el.body.removeAttribute('data-drops');
+  if (rec && st === ST.IDLE && !rec.hasFrames && el.thumbImg.src) {
+    URL.revokeObjectURL(el.thumbImg.src);
+    el.thumbImg.removeAttribute('src');
+  }
   refreshUI();
   updatePill();
 }
@@ -458,9 +468,147 @@ function openSheet(name) {
 }
 
 function closeSheet() {
-  if (el.body.getAttribute('data-sheet') === 'export' && exportCtl) exportCtl.abort();
+  const sheet = el.body.getAttribute('data-sheet');
+  if (sheet === 'export' && exportCtl) exportCtl.abort();
+  if (sheet === 'review') closeReview();
   el.body.removeAttribute('data-sheet');
 }
+
+// A confirm sheet (custom UI, not confirm()). Resolves true for yes.
+function ask(title, text, yes) {
+  el.confirmTitle.textContent = title;
+  el.confirmText.textContent = text;
+  el.confirmYes.textContent = yes;
+  el.body.setAttribute('data-confirm', '1');
+  return new Promise((resolve) => {
+    const end = (v) => {
+      el.body.removeAttribute('data-confirm');
+      el.confirmYes.onclick = el.confirmNo.onclick = null;
+      resolve(v);
+    };
+    el.confirmYes.onclick = () => end(true);
+    el.confirmNo.onclick = () => end(false);
+  });
+}
+
+/* ---------------- review: player and history (plan §11.4) ---------------- */
+
+let cardUrls = [];
+let scrubbing = false;
+
+async function openReview() {
+  if (!rec || rec.state !== ST.PAUSED || !rec.hasFrames) return;
+  rec.setState(ST.REVIEW);
+  renderCards();
+  el.body.setAttribute('data-playing', '0');
+  setPlayTime(0);
+  openSheet('review');
+  if (!player) {
+    player = new Player({
+      workerSrc: WORKER_SRC, store,
+      on: {
+        frame: drawPlayer,
+        time: setPlayTime,
+        state: (p) => el.body.setAttribute('data-playing', p ? '1' : '0'),
+      },
+    });
+  }
+  await player.open(rec.session, rec.pointList, rec.frameCount, rec.sessionEndUs);
+}
+
+function closeReview() {
+  if (player) player.close();
+  if (rec && rec.state === ST.REVIEW) rec.setState(ST.PAUSED);
+}
+
+function drawPlayer(bitmap) {
+  const c = el.player;
+  if (c.width !== bitmap.width || c.height !== bitmap.height) {
+    c.width = bitmap.width;
+    c.height = bitmap.height;
+  }
+  c.getContext('2d').drawImage(bitmap, 0, 0);
+  bitmap.close();
+}
+
+function setPlayTime(t) {
+  const end = rec ? rec.sessionEndUs : 0;
+  if (!scrubbing && end) el.scrub.value = Math.round((1000 * t) / end);
+  el.playTime.textContent = `${formatTime(t)} / ${formatTime(end)}`;
+  el.player.dataset.t = t; // the time of the picture now (also used by the tests)
+}
+
+function renderCards() {
+  cardUrls.forEach((u) => URL.revokeObjectURL(u));
+  cardUrls = [];
+  el.cards.textContent = '';
+  for (const p of rec.pointList) {
+    if (!p) continue;
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'card' + (p.n === rec.points ? ' now' : '');
+    const pic = document.createElement('span');
+    pic.className = 'pic';
+    if (p.thumb) {
+      const u = URL.createObjectURL(p.thumb);
+      cardUrls.push(u);
+      pic.style.backgroundImage = `url("${u}")`;
+    } else pic.textContent = 'Start';
+    const title = document.createElement('b');
+    title.textContent = p.n === 0 ? 'Start' : `Clip ${p.n}`;
+    const time = document.createElement('small');
+    time.textContent = formatTime(p.tsUs) + (p.n === rec.points ? ' · now' : '');
+    b.append(pic, title, time);
+    if (p.drops) {
+      const d = document.createElement('small');
+      d.className = 'warn';
+      d.textContent = `${p.drops} dropped`;
+      b.append(d);
+    }
+    b.addEventListener('click', () => revertTo(p.n));
+    el.cards.appendChild(b);
+  }
+}
+
+async function revertTo(n) {
+  if (n === rec.points) {
+    toast('This is the current point.');
+    return;
+  }
+  if (!(await ask('Revert to here?', 'This deletes all clips after this point. You cannot undo this.', 'Revert'))) return;
+  const job = rec.revert(n); // sets the busy state at once
+  closeSheet();
+  try {
+    await job;
+    toast(n === 0 ? 'Back at the start.' : `Back after clip ${n}.`);
+  } catch (e) {
+    toast('The revert failed: ' + (e && e.message), 5000);
+  }
+  relayout();
+  refreshUI();
+}
+
+el.playBtn.addEventListener('click', () => {
+  if (!player) return;
+  if (el.body.getAttribute('data-playing') === '1') player.pause();
+  else player.play();
+});
+el.scrub.addEventListener('input', () => {
+  if (!player || !rec) return;
+  scrubbing = true;
+  player.pause();
+  const t = (Number(el.scrub.value) / 1000) * rec.sessionEndUs;
+  el.playTime.textContent = `${formatTime(t)} / ${formatTime(rec.sessionEndUs)}`;
+  player.seek(t);
+});
+el.scrub.addEventListener('change', () => (scrubbing = false));
+el.newVideo.addEventListener('click', async () => {
+  if (!(await ask('New video?', 'This deletes the video and its history. You cannot undo this.', 'Delete'))) return;
+  closeSheet();
+  await rec.discard();
+  relayout();
+  refreshUI();
+});
 
 // Settings (plan §7.1 and §7.3; the encoder settings and the full Info section come in Phase 7).
 function updateSettingsSheet() {
@@ -595,15 +743,40 @@ el.exportShare.addEventListener('click', () => {
 function showGate(title, text) {
   el.gateTitle.textContent = title;
   el.gateText.textContent = text;
-  el.gateBtn.disabled = false;
+  el.gateBtn.disabled = el.gateNew.disabled = false;
   el.gate.classList.add('show');
 }
 function hideGate() {
   el.gate.classList.remove('show');
 }
 
-async function start() {
-  el.gateBtn.disabled = true;
+// Plan §11.6: when a stored session has frames, the gate offers "Continue last video" and "Start new".
+async function initGate() {
+  try {
+    store = await Store.open();
+    const list = (await store.listSessions()).sort((a, b) => b.created - a.created);
+    for (const s of list) {
+      if (await store.countFrames(s.id)) {
+        restoreSession = s;
+        break;
+      }
+    }
+  } catch {
+    return;
+  }
+  if (restoreSession) {
+    el.gateText.textContent = 'You have a video that is not finished.';
+    el.gateBtn.textContent = 'Continue last video';
+    el.gateNew.hidden = false;
+  }
+}
+
+async function start(fresh) {
+  el.gateBtn.disabled = el.gateNew.disabled = true;
+  if (fresh && store) {
+    for (const s of await store.listSessions()) await store.deleteSession(s.id);
+    restoreSession = null;
+  }
   try {
     if (!store) store = await Store.open();
   } catch (e) {
@@ -616,12 +789,26 @@ async function start() {
       on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
     });
   }
-  if (await startStream(S.facing)) onState(rec.state);
+  if (!(await startStream(S.facing))) return;
+  if (restoreSession) {
+    const s = restoreSession;
+    restoreSession = null;
+    S.aspect = s.aspect;
+    S.orient = s.orient === 'v' ? 'v' : 'h';
+    try {
+      if (await rec.restore(s)) toast(`Continued: ${rec.frameCount} frames, clip ${rec.clip}.`);
+    } catch (e) {
+      toast('The last video did not open: ' + (e && e.message), 5000);
+    }
+  }
+  onState(rec.state);
+  relayout();
 }
 
 /* ---------------- events ---------------- */
 
-el.gateBtn.addEventListener('click', start);
+el.gateBtn.addEventListener('click', () => start(false));
+el.gateNew.addEventListener('click', () => start(true));
 el.shutter.addEventListener('click', shutter);
 el.flip.addEventListener('click', flipCamera);
 el.ratios.forEach((b) => b.addEventListener('click', () => setAspect(b.dataset.a)));
@@ -634,7 +821,7 @@ el.gearBtn.addEventListener('click', () => {
 el.exportBtn.addEventListener('click', openExport);
 el.sheetBack.addEventListener('click', closeSheet);
 document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closeSheet));
-el.thumbBtn.addEventListener('click', () => toast('The history view comes in a later version.'));
+el.thumbBtn.addEventListener('click', openReview);
 el.dropBadge.addEventListener('click', () => toast(`The encoder dropped ${rec ? rec.drops : 0} frames. ` +
   'Use a smaller size, a smaller search range, or a lower frame rate.', 4500));
 el.micBadge.addEventListener('click', () => toast('No audio. Audio comes in a later version of neomosh.'));
@@ -667,3 +854,4 @@ window.addEventListener('pagehide', () => {
 
 document.title = 'neomosh ' + VERSION;
 relayout();
+initGate();
