@@ -171,4 +171,48 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'self-test with RGB decoder output (as Chrome on Android): the luma is compared, PASS',
+    async fn() {
+      if (!chromium) return skip();
+      // The VideoDecoder output becomes an RGB VideoFrame (drawn on a canvas), as on Android.
+      const init = () => {
+        const VD = window.VideoDecoder;
+        if (!VD) return;
+        window.VideoDecoder = class extends VD {
+          constructor(init) {
+            const c = new OffscreenCanvas(16, 16);
+            const ctx = c.getContext('2d');
+            super({
+              ...init,
+              output: (f) => {
+                c.width = f.displayWidth;
+                c.height = f.displayHeight;
+                ctx.drawImage(f, 0, 0);
+                const g = new VideoFrame(c, { timestamp: f.timestamp });
+                f.close();
+                init.output(g);
+              },
+            });
+          }
+        };
+      };
+      const h = await openApp('selfrgb', { hash: '#debug', init });
+      try {
+        const { page } = h;
+        await h.start();
+        await h.clip(1500);
+        await h.clip(1000);
+        await page.click('#gearBtn');
+        await page.click('#selfTest');
+        await page.waitForSelector('#selfTestOut[data-result]', { timeout: 90000 });
+        const out = await page.$eval('#selfTestOut', (e) => e.textContent);
+        console.log(`      ${out.replace(/\n/g, '\n      ')}`);
+        assert(/Close: \d+ frames \(the browser gives RGB/.test(out), 'the RGB path was not used');
+        assert(await page.$eval('#selfTestOut', (e) => e.dataset.result) === 'pass', out);
+      } finally {
+        await h.close();
+      }
+    },
+  },
 ];

@@ -250,3 +250,4 @@ body[data-confirm="1"] #confirm{display:flex}
 @media (prefers-reduced-motion:reduce){
   *{animation-duration:.01ms !important;transition-duration:.01ms !important}
 }
+#selfTestOut{white-space:pre-line}

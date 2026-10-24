@@ -799,9 +799,19 @@ function updateSettingsSheet() {
         (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '')) +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
       `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}). ` +
-      `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? 'worker' : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
-      `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. neomosh v${VERSION}`;
+      `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
+      `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
+      `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }
+}
+
+// The browser name and version, for the info section (the capture path depends on the browser).
+function browserName() {
+  const ua = navigator.userAgent;
+  const m = ua.match(/(SamsungBrowser|Firefox|FxiOS|EdgA?|OPR|CriOS|Chrome)\/(\d+)/);
+  if (m) return `${m[1]} ${m[2]}${/; wv\)/.test(ua) ? ' (WebView)' : ''}`;
+  const s = ua.match(/Version\/(\d+(\.\d+)?).*Safari/);
+  return s ? `Safari ${s[1]}` : ua.slice(0, 60);
 }
 
 // The time for each frame of the slowest worker. The capture worker and the encoder work in parallel.
@@ -1087,10 +1097,17 @@ el.selfTest.addEventListener('click', async () => {
   el.selfTestOut.textContent = 'Running…';
   try {
     await rec.store.flush();
-    const r = await selfTest(WORKER_SRC, rec.params, rec.store.readFrames(rec.session.id),
-      (n) => (el.selfTestOut.textContent = `Running… ${n} frames`));
-    el.selfTestOut.textContent = (r.ok ? 'PASS. ' : 'FAIL. ') + r.message;
-    el.selfTestOut.dataset.result = r.ok ? 'pass' : 'fail';
+    // Software decoder: exact. Hardware decoder: the one that players use (plan §13.3).
+    const lines = [];
+    let ok = true;
+    for (const [hw, name] of [['prefer-software', 'Software decoder'], ['prefer-hardware', 'Hardware decoder']]) {
+      const r = await selfTest(WORKER_SRC, rec.params, rec.store.readFrames(rec.session.id),
+        (n) => (el.selfTestOut.textContent = [...lines, `${name}: running… ${n} frames`].join('\n')), hw);
+      lines.push(`${name}: ${r.ok ? 'PASS' : 'FAIL'}. ${r.message}`);
+      ok = ok && r.ok;
+    }
+    el.selfTestOut.textContent = lines.join('\n');
+    el.selfTestOut.dataset.result = ok ? 'pass' : 'fail';
   } finally {
     el.selfTest.disabled = false;
     rec.setState(prev);
