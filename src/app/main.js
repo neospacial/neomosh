@@ -27,6 +27,7 @@ const el = {
   confirmYes: $('confirmYes'), confirmNo: $('confirmNo'),
   sheetBack: $('sheetBack'), info: $('info'), lockHint: $('lockHint'), fpsHint: $('fpsHint'), storageInfo: $('storageInfo'),
   qp: $('qp'), qpVal: $('qpVal'), skipBias: $('skipBias'), skipVal: $('skipVal'), encReset: $('encReset'),
+  bloomBtn: $('bloomBtn'),
   debugGroup: $('debugGroup'), selfTest: $('selfTest'), selfTestOut: $('selfTestOut'),
   expMode: $('expMode'), expScale: $('expScale'), upRow: $('upRow'), upLbl: $('upLbl'),
   cutList: $('cutList'), allCuts: $('allCuts'), progress: $('progress').firstElementChild, exportMsg: $('exportMsg'),
@@ -874,7 +875,8 @@ function updateSettingsSheet() {
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
       `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops; ` +
       `view skipped ${rec.viewSkips || 0}, the file has these frames). ` +
-      `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
+      `Frames: ${rec.frameCount}${rec.bloomFrames ? ` (bloom ${rec.bloomFrames} in this clip)` : ''}. ` +
+      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }
@@ -1133,7 +1135,13 @@ async function start(fresh) {
     rec = new Recorder({
       captureMethod: HASH.get('capture'),
       workerSrc: WORKER_SRC, store, video: el.preview,
-      on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
+      on: {
+        state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000),
+        bloom: (on) => {
+          el.bloomBtn.classList.toggle('on', on);
+          el.bloomBtn.setAttribute('aria-pressed', String(on));
+        },
+      },
     });
     rec.settings = { ...S.enc };
   }
@@ -1169,6 +1177,24 @@ el.gearBtn.addEventListener('click', () => {
   openSheet('settings');
 });
 el.exportBtn.addEventListener('click', openExport);
+
+// Bloom (plan §15): hold the button (or the B key) while recording.
+el.bloomBtn.addEventListener('pointerdown', (e) => {
+  if (!rec) return;
+  e.preventDefault();
+  try {
+    el.bloomBtn.setPointerCapture(e.pointerId);
+  } catch { /* no capture */ }
+  rec.setBloom(true);
+});
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) el.bloomBtn.addEventListener(ev, () => rec && rec.setBloom(false));
+el.bloomBtn.addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('keydown', (e) => {
+  if ((e.key === 'b' || e.key === 'B') && !e.repeat && rec && !el.body.hasAttribute('data-sheet')) rec.setBloom(true);
+});
+document.addEventListener('keyup', (e) => {
+  if ((e.key === 'b' || e.key === 'B') && rec) rec.setBloom(false);
+});
 
 // Plan §13.3: the self-test is a hidden debug setting. Open the page with #debug to show it.
 el.debugGroup.hidden = !HASH.has('debug');

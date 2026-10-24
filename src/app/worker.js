@@ -56,12 +56,27 @@ let cap = null;
 // Encoder worker: the port from the capture worker.
 let capPort = null;
 
+// Bloom (plan §15): while the button is held, each frame is a copy of the last P-frame of this clip
+// (bloomSrc), not the camera picture. lastP: a copy of the last P packet (its bits go to the main
+// thread, so they are copied here).
+let bloom = false, bloomSrc = null, lastP = null;
+
+function bloomPacket() {
+  return bloom && bloomSrc && enc.hasRef && enc.nextType === 'p' ? enc.repeat(bloomSrc) : null;
+}
+
+function keepLastP(pkt) {
+  if (pkt.type === 'p' && !pkt.bloom) lastP = { ...pkt, bits: pkt.bits.slice() };
+}
+
 // A picture from the capture worker: RGBA, or the planes (coded size) of the 'yuv' way.
 function encodeRgba(m) {
   const t0 = performance.now();
-  const [Y, U, V] = m.Y ? [m.Y, m.U, m.V] : enc.inputFromRgba(m.rgba);
+  const bp = bloomPacket();
+  const [Y, U, V] = bp ? [] : m.Y ? [m.Y, m.U, m.V] : enc.inputFromRgba(m.rgba);
   const t1 = performance.now();
-  const pkt = enc.encode(Y, U, V);
+  const pkt = bp || enc.encode(Y, U, V);
+  keepLastP(pkt);
   const t2 = performance.now();
   self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0, capMs: m.grabMs }, [pkt.bits.buffer]);
 }
@@ -285,9 +300,11 @@ const handlers = {
     ctx.setTransform(m.mirror ? -1 : 1, 0, 0, 1, m.mirror ? w : 0, 0);
     ctx.drawImage(m.bitmap, 0, 0, w, h);
     m.bitmap.close();
-    const [Y, U, V] = enc.inputFromRgba(ctx.getImageData(0, 0, w, h).data); // RGB to YUV in the kernels
+    const bp = bloomPacket();
+    const [Y, U, V] = bp ? [] : enc.inputFromRgba(ctx.getImageData(0, 0, w, h).data); // RGB to YUV in the kernels
     const t1 = performance.now();
-    const pkt = enc.encode(Y, U, V);
+    const pkt = bp || enc.encode(Y, U, V);
+    keepLastP(pkt);
     const t2 = performance.now();
     self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0 }, [pkt.bits.buffer]);
   },
@@ -312,12 +329,23 @@ const handlers = {
 
   newClip() {
     enc.newClip();
+    lastP = bloomSrc = null;
+    bloom = false;
   },
   restart() {
     enc.restart();
+    lastP = bloomSrc = null;
+    bloom = false;
   },
   continueSession() {
     enc.continueSession();
+    lastP = bloomSrc = null;
+    bloom = false;
+  },
+  // Bloom on: repeat the last P-frame of this clip from the next frame. Off: the camera again.
+  bloom(m) {
+    bloom = !!m.on;
+    bloomSrc = bloom ? lastP : null;
   },
   settings(m) {
     enc.setSettings(m.settings);

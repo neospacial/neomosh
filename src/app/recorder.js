@@ -211,6 +211,13 @@ export class Recorder {
     }
   }
 
+  setBloomOff() {
+    if (!this.bloomOn) return;
+    this.bloomOn = false;
+    if (this.enc) this.enc.postMessage({ cmd: 'bloom', on: false });
+    if (this.on.bloom) this.on.bloom(false);
+  }
+
   // The page goes away (pagehide): stop the camera track of the capture at once, so that no camera
   // frame is left in a page that ends.
   stopCaptureNow() {
@@ -310,8 +317,11 @@ export class Recorder {
     this.clipFrames = 0;
     this.clipDrops = 0;
     this.dropKinds = { enc: 0, page: 0, cap: 0 };
+    this.bloomFrames = 0;
     this.camSkips = 0; // source frames that the camera did not give (not drops, R-19)
     this.viewSkips = 0; // live view pictures not shown (R-21); the file has these frames
+    this.bloomFrames = 0; // repeated P-frames in this clip (Bloom)
+    this.bloomOn = false;
     this.clipStartFrameTime = null;
     this.gate = null;
     this.lastPresented = null;
@@ -416,8 +426,12 @@ export class Recorder {
     }
     if (m.cmd !== 'packet') return;
     this.encInFlight--;
-    this.encMs = this.encMs ? this.encMs * 0.9 + m.ms * 0.1 : m.ms;
-    this.grabMs = this.grabMs ? this.grabMs * 0.9 + m.grabMs * 0.1 : m.grabMs;
+    if (m.pkt.bloom) this.bloomFrames++;
+    else {
+      // A bloom frame is not encoded (a copy): it does not count for the speed.
+      this.encMs = this.encMs ? this.encMs * 0.9 + m.ms * 0.1 : m.ms;
+      this.grabMs = this.grabMs ? this.grabMs * 0.9 + m.grabMs * 0.1 : m.grabMs;
+    }
     if (m.capMs !== undefined) this.capMs = this.capMs ? this.capMs * 0.9 + m.capMs * 0.1 : m.capMs;
     const pkt = m.pkt;
     const index = this.frameCount++;
@@ -426,7 +440,7 @@ export class Recorder {
     this.lastTsUs = m.tsUs;
     this.store.addFrame({
       sessionId: this.session.id, index, type: pkt.type, clip: this.clip, tsUs: m.tsUs, qp: pkt.qp,
-      bits: pkt.bits, bitLen: pkt.bitLen, hdrBits: pkt.hdrBits, settings: pkt.settings,
+      bits: pkt.bits, bitLen: pkt.bitLen, hdrBits: pkt.hdrBits, settings: pkt.settings, bloom: !!pkt.bloom,
     });
     // R-21: no preview bitmap when the decoder is late.
     // R-26: a write failed (for example the storage is full): stop at once.
@@ -467,9 +481,19 @@ export class Recorder {
     }
   }
 
+  // Bloom (plan §15): while on, each frame repeats the last P-frame of this clip. Only while recording.
+  setBloom(on) {
+    on = !!on && this.state === ST.RECORDING;
+    if (on === this.bloomOn) return;
+    this.bloomOn = on;
+    if (this.enc) this.enc.postMessage({ cmd: 'bloom', on });
+    if (this.on.bloom) this.on.bloom(on);
+  }
+
   // Plan §8.4.
   async pause(reason) {
     if (this.state !== ST.RECORDING) return;
+    this.setBloomOff();
     this.setState(ST.PAUSING); // step 1: the capture loop stops
     this.unlockScreen();
     if (reason && this.on.toast) this.on.toast(reason);

@@ -10,6 +10,7 @@ import { writeResidualBlock } from './cavlc.js';
 import { makeRef, allocRef, buildRef, buildHalf, predLuma, predChroma, sadLuma } from './inter.js';
 import { rgbaToYuv420 } from './color.js';
 import { Kernels } from './wasm.js';
+import { Decoder } from './decoder.js';
 import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
 import {
   MbResidual, reconInterMB, forward4x4, quant4x4, hadamard2x2, quantChromaDC,
@@ -213,6 +214,25 @@ export class Encoder {
       settings: { ...s },
       stats: this.stats,
     };
+  }
+
+  // Bloom (plan §15): the same P-frame again. The packet is a copy of an earlier P packet (its slice
+  // data bits do not change). The decoder applies it to its current picture; the encoder does the same
+  // to its reference with a decoder (the decoder output is the encoder reconstruction, bit for bit), so
+  // the next frames are coded against the correct picture.
+  repeat(pkt) {
+    if (pkt.type !== 'p' || !this.hasRef) throw new Error('Bloom needs a P-frame and a reference');
+    if (!this.bloomDec) this.bloomDec = new Decoder(this.w, this.h);
+    const d = this.bloomDec;
+    d.setRef(this.recY, this.recU, this.recV);
+    d.decodePacket(pkt);
+    this.recY.set(d.Y);
+    this.recU.set(d.U);
+    this.recV.set(d.V);
+    buildRef(this.ref, this.recY, this.recU, this.recV);
+    this.nextType = 'p';
+    this.stats = { skip: 0, inter: 0, pcm: 0, bloom: 1 };
+    return { type: 'p', qp: pkt.qp, bits: pkt.bits.slice(), bitLen: pkt.bitLen, hdrBits: pkt.hdrBits, settings: { ...pkt.settings }, stats: this.stats, bloom: true };
   }
 
   // An I_PCM MB: mb_skip_run (when skipRun >= 0), mb_type, the samples.

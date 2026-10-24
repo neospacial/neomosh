@@ -18,6 +18,7 @@ export function assert(cond, msg) {
 // Run a recorder script on the encoder.
 // spec: { w, h, fps, settings, script: [op...] }. Ops:
 //   { record: n, content, opt }   encode n frames (time continues across clips)
+//   { bloom: n }                  repeat the last P-frame n times (plan §15, Bloom)
 //   { pause: true }               make a pause point
 //   { settings: {...} }           change the encoder settings (while paused)
 //   { revert: N }                 revert to pause point N (0 = start)
@@ -44,6 +45,15 @@ export function simulate(spec) {
       for (let i = 0; i < op.record; i++, t++) {
         const f = CONTENT[op.content ?? 'pan'](w, h, op.t0 !== undefined ? op.t0 + i : t, op.opt ?? {});
         const pkt = enc.encode(f.Y, f.U, f.V);
+        pkt.tsUs = tsUs;
+        tsUs += duration(k++);
+        frames.push(pkt);
+        recon.push({ Y: enc.recY.slice(), U: enc.recU.slice(), V: enc.recV.slice() });
+      }
+    } else if (op.bloom) {
+      const src = [...frames].reverse().find((f) => f.type === 'p');
+      for (let i = 0; i < op.bloom; i++, t++) {
+        const pkt = enc.repeat(src);
         pkt.tsUs = tsUs;
         tsUs += duration(k++);
         frames.push(pkt);
