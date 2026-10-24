@@ -55,6 +55,7 @@ Main flow:
 | D18 | No `navigator.storage.persist()` request: some browsers show a permission prompt for it. The app uses best-effort storage, writes often, and warns when free storage is low (R-26). |
 | D19 | Encoder queue: a maximum of 6 frames in flight (R-18), not 2. The buffer (about 200 ms at 30 fps) absorbs short CPU load peaks from other apps without drops. It does not change the look or the file. The live mosh view can be late by up to this time during a peak. |
 | D20 | **No audio.** Audio is removed from the app (it replaces D11): no microphone, no file sound, no AAC, no audio badge, video-only MP4. §10, R-30, the audio rows of §4, §11.3, and §12, and Phase 6 do not apply. Reason: the app must use all of the device for the encoder. |
+| D21 | **WebAssembly codec.** The computation-intensive parts of the encoder and the decoder (frame loops, motion search, interpolation, transform, quantization, CAVLC, colour conversion) are C code (`src/codec/wasm/kernels.c`) compiled to WebAssembly with SIMD. The module is in the HTML file (no network request). The JavaScript codec stays as the fallback and as the reference: both must give bit-identical streams (tests). It replaces the "plain JavaScript" rule of R-09. |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -166,6 +167,7 @@ The app ships as one HTML file. For development and for Node tests, keep the sou
 /src/codec/decoder.js         frame decoder (subset of H.264 that the encoder makes)
 /src/codec/headers.js         SPS, PPS, slice header writers, NAL wrapper
 /src/codec/color.js           RGBA↔YUV 4:2:0 (BT.709 limited range)
+/src/codec/wasm/kernels.c     WebAssembly kernels (D21); tools/build-wasm.mjs compiles them
 /src/mux/mp4.js               MP4 muxer (video + optional AAC)
 /src/app/*.js                 UI, capture, storage, audio, export, settings
 /src/app/index.html, style.css
@@ -174,7 +176,7 @@ The app ships as one HTML file. For development and for Node tests, keep the sou
 /dist/neomosh-v0.1.0.html     shipped file
 ```
 
-- **R-09** The codec modules are plain JavaScript with no dependencies. They run in Node, in a worker, and on the main thread.
+- **R-09** The codec has no dependencies. It runs in Node, in a worker, and on the main thread. Its computation-intensive parts are WebAssembly (D21), compiled from our C source; without WebAssembly SIMD, the JavaScript functions run.
 - **R-10** The build inlines the worker code as text and makes the workers from Blob URLs. The shipped file makes no network requests.
 
 ---

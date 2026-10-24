@@ -3,7 +3,6 @@
 
 import { Encoder } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
-import { rgbaToYuv420, yuv420ToRgba } from '../codec/color.js';
 
 let enc = null;
 let dec = null;
@@ -11,19 +10,20 @@ let canvas = null;
 let ctx = null;
 let img = null;
 let w = 0, h = 0;
-let Y, U, V;
 
 function initCanvas(width, height) {
   w = width;
   h = height;
   canvas = new OffscreenCanvas(w, h);
   ctx = canvas.getContext('2d', { willReadFrequently: true, alpha: false });
-  img = new ImageData(w, h);
+  img = null;
 }
 
-// The current decoder picture as an ImageBitmap (visible size).
+// The current decoder picture as an ImageBitmap (visible size). The RGBA conversion is in the
+// kernels (D21); img is a view of the decoder memory, so there is no extra copy.
 function decodedBitmap() {
-  yuv420ToRgba(dec.Y, dec.U, dec.V, dec.codedW, w, h, img.data);
+  const rgba = dec.toRgba();
+  if (!img || img.data.buffer !== rgba.buffer) img = new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length), w, h);
   ctx.putImageData(img, 0, 0);
   return canvas.transferToImageBitmap();
 }
@@ -48,13 +48,10 @@ const handlers = {
     warmUp();
     if (m.role === 'enc') {
       enc = new Encoder(m.w, m.h, m.settings);
-      Y = new Uint8Array(enc.codedW * enc.codedH);
-      U = new Uint8Array(Y.length >> 2);
-      V = new Uint8Array(Y.length >> 2);
     } else {
       dec = new Decoder(m.w, m.h);
     }
-    self.postMessage({ cmd: 'ready' });
+    self.postMessage({ cmd: 'ready', wasm: !!(enc || dec).k });
   },
 
   // Encoder. R-16: draw the bitmap (mirrored when needed), read the pixels, convert to YUV 4:2:0.
@@ -63,8 +60,7 @@ const handlers = {
     ctx.setTransform(m.mirror ? -1 : 1, 0, 0, 1, m.mirror ? w : 0, 0);
     ctx.drawImage(m.bitmap, 0, 0, w, h);
     m.bitmap.close();
-    const rgba = ctx.getImageData(0, 0, w, h).data;
-    rgbaToYuv420(rgba, w, h, enc.codedW, enc.codedH, Y, U, V);
+    const [Y, U, V] = enc.inputFromRgba(ctx.getImageData(0, 0, w, h).data); // RGB to YUV in the kernels
     const t1 = performance.now();
     const pkt = enc.encode(Y, U, V);
     const t2 = performance.now();

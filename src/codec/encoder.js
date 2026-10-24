@@ -7,8 +7,10 @@
 import { BitWriter, extractBits, seBits } from './bitio.js';
 import { ZIGZAG4x4, CBP_INTER_TO_CODE, CHROMA_QP } from './tables.js';
 import { writeResidualBlock } from './cavlc.js';
-import { makeRef, buildRef, predLuma, predChroma, sadLuma } from './inter.js';
-import { makeMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
+import { makeRef, allocRef, buildRef, buildHalf, predLuma, predChroma, sadLuma } from './inter.js';
+import { rgbaToYuv420 } from './color.js';
+import { Kernels } from './wasm.js';
+import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
 import {
   MbResidual, reconInterMB, forward4x4, quant4x4, hadamard2x2, quantChromaDC,
 } from './transform.js';
@@ -74,18 +76,49 @@ export class Encoder {
     this.mbH = this.codedH >> 4;
     this.numMbs = this.mbW * this.mbH;
     this.settings = checkSettings(settings);
-    this.ref = makeRef(this.codedW, this.codedH);
-    this.recY = new Uint8Array(this.codedW * this.codedH);
-    this.recU = new Uint8Array((this.codedW * this.codedH) >> 2);
-    this.recV = new Uint8Array((this.codedW * this.codedH) >> 2);
-    this.info = makeMbInfo(this.numMbs);
-    this.prevMvx = new Int16Array(this.numMbs);
-    this.prevMvy = new Int16Array(this.numMbs);
-    this.res = new MbResidual();
-    this.predY = new Uint8Array(256);
-    this.predU = new Uint8Array(64);
-    this.predV = new Uint8Array(64);
-    this.tmpY = new Uint8Array(256);
+    const n = this.codedW * this.codedH, cn = n >> 2;
+    // D21: the planes and buffers are in the memory of the WebAssembly kernels when available.
+    const k = Kernels.create();
+    this.k = k;
+    if (k) {
+      const p = {
+        rec: k.alloc(n + 2 * cn), src: k.alloc(n + 2 * cn), rgba: k.alloc(w * h * 4), pred: k.alloc(384),
+        tmp: k.alloc(256), res: k.alloc(417 * 4), visited: k.alloc(129 * 129 * 4), mv: k.alloc(8),
+        bits: k.alloc(this.numMbs * 1600 + 4096), out: k.alloc(this.numMbs * 1600 + 4096),
+        prev: k.alloc(this.numMbs * 4), stats: k.alloc(16),
+      };
+      const mkRef = allocRef(k, this.codedW, this.codedH);
+      const mkInfo = allocMbInfo(k, this.numMbs, this.mbW, this.mbH);
+      k.seal();
+      this.ref = mkRef();
+      this.info = mkInfo();
+      this.prevMvx = new Int16Array(k.mem.buffer, p.prev, this.numMbs);
+      this.prevMvy = new Int16Array(k.mem.buffer, p.prev + this.numMbs * 2, this.numMbs);
+      this.kStats = k.i32(p.stats, 4);
+      [this.recY, this.recU, this.recV] = [k.u8(p.rec, n), k.u8(p.rec + n, cn), k.u8(p.rec + n + cn, cn)];
+      [this.srcY, this.srcU, this.srcV] = [k.u8(p.src, n), k.u8(p.src + n, cn), k.u8(p.src + n + cn, cn)];
+      this.rgba = k.u8(p.rgba, w * h * 4);
+      [this.predY, this.predU, this.predV] = [k.u8(p.pred, 256), k.u8(p.pred + 256, 64), k.u8(p.pred + 320, 64)];
+      this.tmpY = k.u8(p.tmp, 256);
+      this.res = new MbResidual(k, p.res);
+      this.visited = k.i32(p.visited, 129 * 129); // motion search: positions tested for this MB
+      this.mvOut = k.i32(p.mv, 2);
+      // The slice data writer (kernels.c): its buffer, and the TotalCoeff arrays for nC.
+      this.bitBuf = k.u8(p.bits, this.numMbs * 1600 + 4096);
+      this.outBuf = k.u8(p.out, this.numMbs * 1600 + 4096);
+    } else {
+      this.ref = makeRef(this.codedW, this.codedH);
+      [this.recY, this.recU, this.recV] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
+      [this.srcY, this.srcU, this.srcV] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
+      this.rgba = null;
+      [this.predY, this.predU, this.predV] = [new Uint8Array(256), new Uint8Array(64), new Uint8Array(64)];
+      this.tmpY = new Uint8Array(256);
+      this.res = new MbResidual();
+      this.visited = new Int32Array(129 * 129); // motion search: positions tested for this MB
+      this.info = makeMbInfo(this.numMbs);
+      this.prevMvx = new Int16Array(this.numMbs);
+      this.prevMvy = new Int16Array(this.numMbs);
+    }
     this.mv = new Int32Array(2);
     this.mvp = new Int32Array(2);
     this.blk = new Int32Array(16);
@@ -94,7 +127,6 @@ export class Encoder {
     this.scan = new Int32Array(16);
     this.dc = new Int32Array(4);
     this.dcF = new Int32Array(4);
-    this.visited = new Int32Array(129 * 129); // motion search: positions tested for this MB
     this.visitStamp = 0;
     this.nextType = 'idr';
     this.hasRef = false;
@@ -128,9 +160,26 @@ export class Encoder {
     this.hasRef = false;
   }
 
+  // The input planes from a visible RGBA picture (w x h). Returns [Y, U, V] for encode().
+  inputFromRgba(rgba) {
+    if (this.k) {
+      this.rgba.set(rgba);
+      this.k.x.rgba_to_yuv420(this.rgba.byteOffset, this.w, this.h, this.codedW, this.codedH,
+        this.srcY.byteOffset, this.srcU.byteOffset, this.srcV.byteOffset);
+    } else rgbaToYuv420(rgba, this.w, this.h, this.codedW, this.codedH, this.srcY, this.srcU, this.srcV);
+    return [this.srcY, this.srcU, this.srcV];
+  }
+
   // Encode one picture. Y, U, V: coded-size planes (pad the visible picture by edge copy).
   // Returns the frame packet { type, qp, bits, bitLen, hdrBits, settings, stats }.
   encode(Y, U, V) {
+    if (this.k && Y !== this.srcY) {
+      // The kernels read the source from their memory.
+      this.srcY.set(Y);
+      this.srcU.set(U);
+      this.srcV.set(V);
+      [Y, U, V] = [this.srcY, this.srcU, this.srcV];
+    }
     const type = this.nextType;
     const s = this.settings;
     const frame = { type, qp: s.qp };
@@ -138,8 +187,18 @@ export class Encoder {
     writeSliceHeader(bw, headerForFrame(frame, 0));
     const hdrBits = bw.pos;
     this.stats = { skip: 0, inter: 0, pcm: 0 };
+    // With the kernels, the slice data goes to their writer. It starts at the same bit alignment.
+    if (this.k) this.k.x.bw_reset(this.bitBuf.byteOffset, hdrBits & 7);
     if (type === 'p') this.encodeP(bw, Y, U, V);
     else this.encodeI(bw, Y, U, V);
+    let bits, bitLen;
+    if (this.k) {
+      bitLen = this.k.x.bw_extract(this.outBuf.byteOffset);
+      bits = this.outBuf.slice(0, (bitLen + 7) >> 3);
+    } else {
+      bits = extractBits(bw.buf, hdrBits, bw.pos);
+      bitLen = bw.pos - hdrBits;
+    }
     buildRef(this.ref, this.recY, this.recU, this.recV);
     this.prevMvx.set(this.info.mvx);
     this.prevMvy.set(this.info.mvy);
@@ -148,15 +207,26 @@ export class Encoder {
     return {
       type,
       qp: s.qp,
-      bits: extractBits(bw.buf, hdrBits, bw.pos),
-      bitLen: bw.pos - hdrBits,
+      bits,
+      bitLen,
       hdrBits,
       settings: { ...s },
       stats: this.stats,
     };
   }
 
-  writePcm(bw, Y, U, V, mbx, mby) {
+  // An I_PCM MB: mb_skip_run (when skipRun >= 0), mb_type, the samples.
+  writePcm(bw, Y, U, V, mbx, mby, skipRun, mbType) {
+    if (this.k) {
+      const W = this.codedW, cW = W >> 1;
+      const yOff = mby * 16 * W + mbx * 16, cOff = mby * 8 * cW + mbx * 8;
+      this.k.x.write_pcm_mb(skipRun, mbType, Y.byteOffset + yOff, U.byteOffset + cOff, V.byteOffset + cOff,
+        this.recY.byteOffset + yOff, this.recU.byteOffset + cOff, this.recV.byteOffset + cOff, W, cW);
+      this.pcmInfo(mbx, mby);
+      return;
+    }
+    if (skipRun >= 0) bw.ue(skipRun);
+    bw.ue(mbType);
     bw.alignZero();
     bw.ensure(384 * 8);
     const buf = bw.buf;
@@ -183,6 +253,10 @@ export class Encoder {
       }
     }
     bw.pos += 384 * 8;
+    this.pcmInfo(mbx, mby);
+  }
+
+  pcmInfo(mbx, mby) {
     const addr = mby * this.mbW + mbx;
     const info = this.info;
     info.type[addr] = MB_PCM;
@@ -198,8 +272,7 @@ export class Encoder {
   encodeI(bw, Y, U, V) {
     for (let mby = 0; mby < this.mbH; mby++) {
       for (let mbx = 0; mbx < this.mbW; mbx++) {
-        bw.ue(25);
-        this.writePcm(bw, Y, U, V, mbx, mby);
+        this.writePcm(bw, Y, U, V, mbx, mby, -1, 25);
       }
     }
   }
@@ -211,6 +284,7 @@ export class Encoder {
 
   sadPred(Y, yOff, pred) {
     const W = this.codedW;
+    if (this.k && this.k.has(Y) && this.k.has(pred)) return this.k.x.sad_block(Y.byteOffset + yOff, W, pred.byteOffset);
     let sad = 0;
     for (let y = 0; y < 16; y++) {
       const s = yOff + y * W, p = y * 16;
@@ -254,6 +328,10 @@ export class Encoder {
   residual(Y, U, V, yOff, cOff, qp) {
     const res = this.res;
     const W = this.codedW, cW = W >> 1;
+    if (this.k) {
+      return this.k.x.residual_mb(Y.byteOffset + yOff, U.byteOffset + cOff, V.byteOffset + cOff, W, cW,
+        this.predY.byteOffset, this.predU.byteOffset, this.predV.byteOffset, qp, res.ptr);
+    }
     const blk = this.blk, wc = this.wc, zc = this.zc;
     const zeroL = ZERO_SAD[qp];
     let cbp = 0;
@@ -328,6 +406,10 @@ export class Encoder {
   // Skip test: true when all luma and chroma levels of the current prediction are zero.
   residualIsZero(Y, U, V, yOff, cOff, qp) {
     const W = this.codedW, cW = W >> 1;
+    if (this.k) {
+      return this.k.x.residual_is_zero(Y.byteOffset + yOff, U.byteOffset + cOff, V.byteOffset + cOff, W, cW,
+        this.predY.byteOffset, this.predU.byteOffset, this.predV.byteOffset, qp) === 1;
+    }
     const blk = this.blk, wc = this.wc, zc = this.zc;
     const zeroL = ZERO_SAD[qp];
     for (let b = 0; b < 16; b++) {
@@ -376,6 +458,16 @@ export class Encoder {
   // Motion search (plan §6.10 steps 2 and 3). Writes the vector to this.mv. Returns its SAD.
   search(Y, yOff, mbx, mby, addr, skx, sky) {
     const s = this.settings;
+    if (this.k) {
+      // The same search in the kernels (kernels.c search_mb).
+      if (s.precision !== 'full' && !this.ref.halfReady) buildHalf(this.ref);
+      const sad = this.k.x.search_mb(this.ref.R, Y.byteOffset + yOff, this.codedW, mbx, mby, s.searchRange, LAMBDA[s.qp],
+        this.mvp[0], this.mvp[1], skx, sky, this.prevMvx[addr], this.prevMvy[addr],
+        s.precision === 'full' ? 0 : s.precision === 'half' ? 1 : 2, this.visited.byteOffset, ++this.visitStamp, this.mvOut.byteOffset);
+      this.mv[0] = this.mvOut[0];
+      this.mv[1] = this.mvOut[1];
+      return sad;
+    }
     const R = s.searchRange;
     const R4 = R * 4;
     const lambda = LAMBDA[s.qp];
@@ -468,6 +560,22 @@ export class Encoder {
     const skipThr = 256 * 16 * (s.skipBias / 100) ** 2;
     const healThr = s.heal === 'off' ? Infinity : HEAL_THRESHOLD[s.heal] * 256;
     const dbg = this.debug;
+    if (this.k && !dbg.forceMv) {
+      // The whole picture in the kernels (kernels.c encode_p_frame, the same steps as below).
+      const k = this.k, st = this.kStats;
+      st[0] = st[1] = st[2] = 0;
+      st[3] = this.visitStamp;
+      k.x.encode_p_frame(this.ref.R, info.I, Y.byteOffset, U.byteOffset, V.byteOffset,
+        this.recY.byteOffset, this.recU.byteOffset, this.recV.byteOffset, W, this.predY.byteOffset, this.res.ptr,
+        this.prevMvx.byteOffset, this.prevMvy.byteOffset, this.visited.byteOffset, qp, s.searchRange,
+        s.precision === 'full' ? 0 : s.precision === 'half' ? 1 : 2, LAMBDA[qp], skipThr, healThr,
+        dbg.forceMode === 'skip' ? 1 : dbg.forceMode === 'noResidual' ? 2 : 0, st.byteOffset);
+      this.stats.skip = st[0];
+      this.stats.inter = st[1];
+      this.stats.pcm = st[2];
+      this.visitStamp = st[3];
+      return;
+    }
     const sk = new Int32Array(2);
     let skipRun = 0;
     for (let mby = 0; mby < this.mbH; mby++) {
@@ -514,11 +622,9 @@ export class Encoder {
         }
 
         // Step 4: heal.
-        bw.ue(skipRun);
-        skipRun = 0;
         if (sad > healThr) {
-          bw.ue(30);
-          this.writePcm(bw, Y, U, V, mbx, mby);
+          this.writePcm(bw, Y, U, V, mbx, mby, skipRun, 30);
+          skipRun = 0;
           continue;
         }
 
@@ -537,24 +643,39 @@ export class Encoder {
         info.nzLuma.set(res.nzLuma, addr * 16);
         info.nzCb.set(res.nzCb, addr * 4);
         info.nzCr.set(res.nzCr, addr * 4);
-        bw.ue(0);
-        bw.se(mvx - this.mvp[0]);
-        bw.se(mvy - this.mvp[1]);
-        bw.ue(CBP_INTER_TO_CODE[cbp]);
-        if (cbp) {
-          bw.se(0); // mb_qp_delta
-          this.writeResidual(bw, addr, mbx, mby);
+        if (this.k) {
+          this.k.x.write_inter_mb(skipRun, mvx - this.mvp[0], mvy - this.mvp[1], res.ptr, addr, mbx, mby, this.mbW,
+            info.nzLuma.byteOffset, info.nzCb.byteOffset, info.nzCr.byteOffset);
+        } else {
+          bw.ue(skipRun);
+          bw.ue(0);
+          bw.se(mvx - this.mvp[0]);
+          bw.se(mvy - this.mvp[1]);
+          bw.ue(CBP_INTER_TO_CODE[cbp]);
+          if (cbp) {
+            bw.se(0); // mb_qp_delta
+            this.writeResidual(bw, addr, mbx, mby);
+          }
         }
+        skipRun = 0;
         // Step 6: reconstruction (R-11).
         reconInterMB(res, qp, this.predY, this.predU, this.predV, this.recY, yOff, W, this.recU, this.recV, cOff, cW);
         this.stats.inter++;
       }
     }
-    if (skipRun > 0) bw.ue(skipRun);
+    if (skipRun > 0) {
+      if (this.k) this.k.x.bw_ue(skipRun);
+      else bw.ue(skipRun);
+    }
   }
 
   copyPred(yOff, cOff) {
     const W = this.codedW, cW = W >> 1;
+    if (this.k) {
+      this.k.x.copy_pred(this.predY.byteOffset, this.predU.byteOffset, this.predV.byteOffset,
+        this.recY.byteOffset + yOff, W, this.recU.byteOffset + cOff, this.recV.byteOffset + cOff, cW);
+      return;
+    }
     for (let y = 0; y < 16; y++) this.recY.set(this.predY.subarray(y * 16, y * 16 + 16), yOff + y * W);
     for (let y = 0; y < 8; y++) {
       this.recU.set(this.predU.subarray(y * 8, y * 8 + 8), cOff + y * cW);

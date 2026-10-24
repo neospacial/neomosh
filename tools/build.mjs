@@ -22,7 +22,8 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(root, 'package.json'
 // Codec modules in dependency order.
 export const CODEC_MODULES = [
   'codec/bitio.js', 'codec/tables.js', 'codec/transform.js', 'codec/inter.js', 'codec/mvpred.js',
-  'codec/cavlc.js', 'codec/headers.js', 'codec/color.js', 'codec/decoder.js', 'codec/encoder.js',
+  'codec/cavlc.js', 'codec/headers.js', 'codec/color.js', 'codec/wasm-bytes.js', 'codec/wasm.js',
+  'codec/decoder.js', 'codec/encoder.js',
 ];
 
 const IMPORT_RE = /^import\s[\s\S]*?from\s+['"][^'"]+['"];?[ \t]*$/gm;
@@ -47,7 +48,13 @@ export function bundle(files) {
 }
 
 const safeScript = (s) => s.replace(/<\/script/gi, '<\\/script');
-const moduleList = (list) => list.split(',').flatMap((s) => (s.trim() === 'codec' ? CODEC_MODULES : [s.trim()]));
+// "codec": all CODEC_MODULES. "codec-main": the same without the WebAssembly module (main page).
+const moduleList = (list) => list.split(',').flatMap((s) => {
+  const t = s.trim();
+  if (t === 'codec') return CODEC_MODULES;
+  if (t === 'codec-main') return CODEC_MODULES.map((m) => (m === 'codec/wasm-bytes.js' ? 'codec/wasm-none.js' : m));
+  return [t];
+});
 
 export function buildPage(template) {
   const dir = path.join(src, path.dirname(template));

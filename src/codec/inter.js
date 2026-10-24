@@ -32,6 +32,35 @@ export function makeRef(w, h) {
   };
 }
 
+// A reference picture in the memory of the WebAssembly kernels k (wasm.js), with the same fields as
+// makeRef. Reserve the memory now; call the returned function after k.seal() to get the object.
+// The kernels get the descriptor R (kernels.c): the geometry and the plane addresses.
+export function allocRef(k, w, h) {
+  const pad = LUMA_PAD, stride = w + 2 * pad, n = stride * (h + 2 * pad);
+  const cw = w >> 1, ch = h >> 1, cpad = CHROMA_PAD, cstride = cw + 2 * cpad, cn = cstride * (ch + 2 * cpad);
+  const p = {
+    G: k.alloc(n), B: k.alloc(n), H: k.alloc(n), J: k.alloc(n), U: k.alloc(cn), V: k.alloc(cn),
+    h1: k.alloc((stride + 32) * 2), R: k.alloc(64),
+  };
+  return () => {
+    const Rv = k.i32(p.R, 16);
+    Rv.set([w, h, pad, stride, p.G, p.B, p.H, p.J, cw, ch, cpad, cstride, p.U, p.V, p.h1, 0]);
+    return {
+      w, h, pad, stride, origin: pad * stride + pad,
+      G: k.u8(p.G, n), B: k.u8(p.B, n), H: k.u8(p.H, n), J: k.u8(p.J, n),
+      cw, ch, cpad, cstride, corigin: cpad * cstride + cpad, U: k.u8(p.U, cn), V: k.u8(p.V, cn),
+      h1row: new Int32Array(stride + 5), k, R: p.R,
+      // The kernels keep this flag in R[15] (they build the half-sample planes when needed).
+      get halfReady() {
+        return Rv[15] === 1;
+      },
+      set halfReady(v) {
+        Rv[15] = v ? 1 : 0;
+      },
+    };
+  };
+}
+
 function padPlaneInto(src, w, h, dst, pad, stride) {
   const rows = h + 2 * pad;
   for (let r = 0; r < rows; r++) {
@@ -47,6 +76,11 @@ function padPlaneInto(src, w, h, dst, pad, stride) {
 
 // Fill the reference planes from a decoded picture (Y: w*h, U/V: w/2*h/2).
 export function buildRef(ref, Y, U, V) {
+  if (ref.k && ref.k.has(Y)) {
+    ref.k.x.build_ref(ref.R, Y.byteOffset, U.byteOffset, V.byteOffset);
+    ref.halfReady = false;
+    return;
+  }
   padPlaneInto(Y, ref.w, ref.h, ref.G, ref.pad, ref.stride);
   padPlaneInto(U, ref.cw, ref.ch, ref.U, ref.cpad, ref.cstride);
   padPlaneInto(V, ref.cw, ref.ch, ref.V, ref.cpad, ref.cstride);
@@ -55,6 +89,11 @@ export function buildRef(ref, Y, U, V) {
 
 // The half-sample planes B, H, and J of the padded plane G.
 export function buildHalf(ref) {
+  if (ref.k) {
+    ref.k.x.build_half(ref.R);
+    ref.halfReady = true;
+    return;
+  }
   const { h, pad, stride: PW, G, B, H, J } = ref;
   const PH = h + 2 * pad;
   const h1 = ref.h1row; // unrounded vertical values, with 2 edge copies on the left and 3 on the right
@@ -129,6 +168,10 @@ const rowIdx = new Int32Array(24);
 // out has stride bw.
 export function predLuma(ref, x, y, mvx, mvy, bw, bh, out) {
   if ((mvx | mvy) & 3 && !ref.halfReady) buildHalf(ref);
+  if (ref.k && bw === 16 && bh === 16 && ref.k.has(out)) {
+    ref.k.x.pred_luma(ref.R, x, y, mvx, mvy, out.byteOffset);
+    return;
+  }
   const xi = x + (mvx >> 2);
   const yi = y + (mvy >> 2);
   const f = FRAC[((mvy & 3) << 2) | (mvx & 3)];
@@ -176,6 +219,7 @@ export function predLuma(ref, x, y, mvx, mvy, bw, bh, out) {
 // The values are the same as predLuma; tmp (256 bytes) is used for the slow path only.
 export function sadLuma(ref, x, y, mvx, mvy, Y, yOff, yStride, limit, tmp) {
   if ((mvx | mvy) & 3 && !ref.halfReady) buildHalf(ref);
+  if (ref.k && ref.k.has(Y)) return ref.k.x.sad_luma(ref.R, x, y, mvx, mvy, Y.byteOffset + yOff, yStride, limit);
   const xi = x + (mvx >> 2);
   const yi = y + (mvy >> 2);
   const { pad, stride, w, h } = ref;
@@ -226,6 +270,10 @@ export function sadLuma(ref, x, y, mvx, mvy, Y, yOff, yStride, limit, tmp) {
 // Chroma prediction (both components) of a bw x bh block at chroma position (x, y).
 // The vector is the luma vector; in chroma samples it has 1/8 precision (4:2:0).
 export function predChroma(ref, x, y, mvx, mvy, bw, bh, outU, outV) {
+  if (ref.k && bw === 8 && bh === 8 && ref.k.has(outU)) {
+    ref.k.x.pred_chroma(ref.R, x, y, mvx, mvy, outU.byteOffset, outV.byteOffset);
+    return;
+  }
   const xi = x + (mvx >> 3);
   const yi = y + (mvy >> 3);
   const xF = mvx & 7, yF = mvy & 7;

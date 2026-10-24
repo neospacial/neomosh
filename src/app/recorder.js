@@ -79,6 +79,7 @@ export class Recorder {
       const prev = wk.onmessage;
       wk.onmessage = (e) => {
         if (e.data.cmd === 'ready') {
+          this.wasm = e.data.wasm;
           wk.onmessage = prev;
           resolve();
         } else prev(e);

@@ -30,6 +30,7 @@ Requirements: Node.js 20 or later. FFmpeg and ffprobe for the tests.
 | Command | Result |
 |---|---|
 | `node tools/build.mjs` | Makes `dist/neomosh-v0.1.0.html` and `dist/neomosh-bench-v0.1.0.html` |
+| `node tools/build-wasm.mjs` | Compiles `src/codec/wasm/kernels.c` to WebAssembly (needs clang with the wasm32 target). Only after a change to the C code: the compiled module is in the repository |
 | `node tests/run.mjs [filter]` | Runs the tests. Output files go to `tests/out/` |
 | `node tools/bench.mjs [frames]` | Runs the encoder benchmark in Node |
 | `node tools/sample.mjs` | Makes sample MP4 files in `samples/` for device tests |
@@ -52,6 +53,7 @@ The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` fil
 | Path | Contents |
 |---|---|
 | `src/codec/` | H.264 subset: bit I/O, tables, transform, interpolation, motion vector prediction, CAVLC, headers, colour, encoder, decoder |
+| `src/codec/wasm/` | The computation-intensive parts of the codec in C, compiled to WebAssembly with SIMD. The JavaScript functions are the fallback and the reference; the tests prove that both give the same bits |
 | `src/bench/` | Benchmark page and core |
 | `src/app/` | App: user interface (based on neocamera v1.5.0), recorder, workers, storage |
 | `src/mux/` | MP4 muxer and lossless export (remux) |

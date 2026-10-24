@@ -3,8 +3,7 @@
 
 import { Encoder, DEFAULT_SETTINGS } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
-import { rgbaToYuv420 } from '../codec/color.js';
-import { align16 } from '../codec/headers.js';
+import { Kernels } from '../codec/wasm.js';
 
 export const BENCH_SIZES = [
   [480, 360], [640, 360],
@@ -40,6 +39,18 @@ function makeTexture(tw, th) {
   return t;
 }
 
+// Sensor noise (about sigma 3, like a phone camera indoors): without it, the encoder can skip most
+// blocks, and the benchmark is too optimistic.
+const NOISE = new Int8Array(1 << 20);
+{
+  let s = 12345;
+  for (let i = 0; i < NOISE.length; i++) {
+    let g = 0;
+    for (let k = 0; k < 4; k++) g += ((s = (Math.imul(s, 1103515245) + 12345) >>> 0) >>> 24) / 255;
+    NOISE[i] = Math.round((g - 2) * 5.2);
+  }
+}
+
 function makeFrame(tex, tw, w, h, t, out) {
   const ox = (t * 3) % 160, oy = (t * 2) % 80;
   for (let y = 0; y < h; y++) {
@@ -52,17 +63,21 @@ function makeFrame(tex, tw, w, h, t, out) {
     const s = ((y + 40) * tw + 40) * 4;
     out.set(tex.subarray(s, s + size * 4), ((sy + y) * w + sx) * 4);
   }
+  const off = (t * 7919) & (NOISE.length - 1 - 4096);
+  for (let i = 0; i < out.length; i++) {
+    if ((i & 3) === 3) continue;
+    const v = out[i] + NOISE[(off + (i >> 2) + (i & 3) * 1031) & (NOISE.length - 1)];
+    out[i] = v < 0 ? 0 : v > 255 ? 255 : v;
+  }
 }
 
 const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
 
 // Run one case. Returns { w, h, preset, encMs, encP95, decMs, kbPerFrame }.
 export function benchCase(w, h, preset, frames = 30) {
-  const cw = align16(w), ch = align16(h);
   const tw = w + 200, th = h + 100;
   const tex = makeTexture(tw, th);
   const rgba = new Uint8Array(w * h * 4);
-  const Y = new Uint8Array(cw * ch), U = new Uint8Array((cw * ch) >> 2), V = new Uint8Array((cw * ch) >> 2);
   const enc = new Encoder(w, h, preset.settings);
   const dec = new Decoder(w, h);
   const encT = [];
@@ -71,7 +86,7 @@ export function benchCase(w, h, preset, frames = 30) {
   for (let t = 0; t <= frames; t++) {
     makeFrame(tex, tw, w, h, t, rgba);
     const t0 = now();
-    rgbaToYuv420(rgba, w, h, cw, ch, Y, U, V);
+    const [Y, U, V] = enc.inputFromRgba(rgba);
     const pkt = enc.encode(Y, U, V);
     const t1 = now();
     dec.decodePacket(pkt);
@@ -99,6 +114,8 @@ export function verdict(r) {
   const fps = 1000 / r.encP95;
   return fps >= 30 ? '30 fps OK' : fps >= 24 ? '24 fps OK' : fps >= 15 ? '15 fps OK' : 'too slow';
 }
+
+export const usesWasm = () => !!Kernels.create();
 
 export function formatResults(results, header = '') {
   const lines = [header, 'size        preset                enc ms  enc p95  dec ms  KB/frame  verdict'];

@@ -751,7 +751,8 @@ function updateSettingsSheet() {
     el.info.textContent = `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
       (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '') +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
-      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}). Frames: ${rec.frameCount}. neomosh v${VERSION}`;
+      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}). Frames: ${rec.frameCount}. ` +
+      `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. neomosh v${VERSION}`;
   }
 }
 

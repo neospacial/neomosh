@@ -1,7 +1,7 @@
 // Node benchmark (plan §13.5). Usage: node tools/bench.mjs [frames]
 // For the phone measurement, open dist/neomosh-bench-v<version>.html on the phone.
 import os from 'node:os';
-import { BENCH_SIZES, BENCH_PRESETS, benchCase, formatResults } from '../src/bench/bench-core.js';
+import { BENCH_SIZES, BENCH_PRESETS, benchCase, formatResults, usesWasm } from '../src/bench/bench-core.js';
 
 const frames = Number(process.argv[2]) || 30;
 const results = [];
@@ -13,4 +13,4 @@ for (const [w, h] of BENCH_SIZES) {
     console.log(formatResults([r]).split('\n')[1]);
   }
 }
-console.log('\n' + formatResults(results, `Node ${process.version}, ${os.cpus()[0].model}`));
+console.log('\n' + formatResults(results, `Node ${process.version}, ${os.cpus()[0].model}, codec: ${usesWasm() ? 'WebAssembly SIMD' : 'JavaScript'}`));
