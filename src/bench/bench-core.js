@@ -1,0 +1,112 @@
+// Benchmark core (plan §13.5): encoder and decoder ms per frame for each size and setting.
+// It runs in Node (tools/bench.mjs) and in a browser worker (dist/neomosh-bench-v*.html).
+
+import { Encoder, DEFAULT_SETTINGS } from '../codec/encoder.js';
+import { Decoder } from '../codec/decoder.js';
+import { rgbaToYuv420 } from '../codec/color.js';
+import { align16 } from '../codec/headers.js';
+
+export const BENCH_SIZES = [
+  [480, 360], [640, 360],
+  [640, 480], [852, 480],
+  [960, 720], [1280, 720],
+];
+
+export const BENCH_PRESETS = [
+  { name: 'Fast (Full, ±8)', settings: { ...DEFAULT_SETTINGS, precision: 'full', searchRange: 8 } },
+  { name: 'Default (Half, ±32)', settings: { ...DEFAULT_SETTINGS } },
+  { name: 'Max (Quarter, ±64)', settings: { ...DEFAULT_SETTINGS, precision: 'quarter', searchRange: 64 } },
+];
+
+function benchHash(x, y) {
+  let h = Math.imul(x, 374761393) + Math.imul(y, 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+// A large RGBA texture. Each frame is a moving window of it (a pan), plus a square that moves faster.
+function makeTexture(tw, th) {
+  const t = new Uint8Array(tw * th * 4);
+  for (let y = 0; y < th; y++) {
+    for (let x = 0; x < tw; x++) {
+      const o = (y * tw + x) * 4;
+      const n = benchHash(x >> 2, y >> 2) & 63;
+      t[o] = 110 + 70 * Math.sin(x / 23) + n;
+      t[o + 1] = 110 + 70 * Math.cos(y / 19) + n;
+      t[o + 2] = 110 + 70 * Math.sin((x + y) / 31) + n;
+      t[o + 3] = 255;
+    }
+  }
+  return t;
+}
+
+function makeFrame(tex, tw, w, h, t, out) {
+  const ox = (t * 3) % 160, oy = (t * 2) % 80;
+  for (let y = 0; y < h; y++) {
+    const s = ((y + oy) * tw + ox) * 4;
+    out.set(tex.subarray(s, s + w * 4), y * w * 4);
+  }
+  const size = h >> 2;
+  const sx = (t * 11) % (w - size), sy = (t * 5) % (h - size);
+  for (let y = 0; y < size; y++) {
+    const s = ((y + 40) * tw + 40) * 4;
+    out.set(tex.subarray(s, s + size * 4), ((sy + y) * w + sx) * 4);
+  }
+}
+
+const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+// Run one case. Returns { w, h, preset, encMs, encP95, decMs, kbPerFrame }.
+export function benchCase(w, h, preset, frames = 30) {
+  const cw = align16(w), ch = align16(h);
+  const tw = w + 200, th = h + 100;
+  const tex = makeTexture(tw, th);
+  const rgba = new Uint8Array(w * h * 4);
+  const Y = new Uint8Array(cw * ch), U = new Uint8Array((cw * ch) >> 2), V = new Uint8Array((cw * ch) >> 2);
+  const enc = new Encoder(w, h, preset.settings);
+  const dec = new Decoder(w, h);
+  const encT = [];
+  const decT = [];
+  let bits = 0;
+  for (let t = 0; t <= frames; t++) {
+    makeFrame(tex, tw, w, h, t, rgba);
+    const t0 = now();
+    rgbaToYuv420(rgba, w, h, cw, ch, Y, U, V);
+    const pkt = enc.encode(Y, U, V);
+    const t1 = now();
+    dec.decodePacket(pkt);
+    const t2 = now();
+    // Frame 0 is the IDR (I_PCM). Measure only the P-frames.
+    if (t > 0) {
+      encT.push(t1 - t0);
+      decT.push(t2 - t1);
+      bits += pkt.bitLen;
+    }
+  }
+  const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const sorted = encT.slice().sort((a, b) => a - b);
+  return {
+    w, h, preset: preset.name,
+    encMs: avg(encT),
+    encP95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
+    decMs: avg(decT),
+    kbPerFrame: bits / frames / 8 / 1024,
+  };
+}
+
+// The encoder and the decoder run in separate workers (R-06), so the encoder sets the frame rate.
+export function verdict(r) {
+  const fps = 1000 / r.encP95;
+  return fps >= 30 ? '30 fps OK' : fps >= 24 ? '24 fps OK' : fps >= 15 ? '15 fps OK' : 'too slow';
+}
+
+export function formatResults(results, header = '') {
+  const lines = [header, 'size        preset                enc ms  enc p95  dec ms  KB/frame  verdict'];
+  for (const r of results) {
+    lines.push(
+      `${(r.w + 'x' + r.h).padEnd(11)} ${r.preset.padEnd(21)} ${r.encMs.toFixed(1).padStart(6)}  ${r.encP95.toFixed(1).padStart(7)}  ` +
+      `${r.decMs.toFixed(1).padStart(6)}  ${r.kbPerFrame.toFixed(1).padStart(8)}  ${verdict(r)}`,
+    );
+  }
+  return lines.filter((l) => l !== '').join('\n');
+}

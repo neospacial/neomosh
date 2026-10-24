@@ -1,0 +1,12 @@
+{
+  "name": "neomosh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A true-datamosh video recorder in one standalone HTML file.",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node tests/run.mjs",
+    "bench": "node tools/bench.mjs"
+  }
+}
