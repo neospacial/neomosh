@@ -65,8 +65,10 @@ const handlers = {
     m.bitmap.close();
     const rgba = ctx.getImageData(0, 0, w, h).data;
     rgbaToYuv420(rgba, w, h, enc.codedW, enc.codedH, Y, U, V);
+    const t1 = performance.now();
     const pkt = enc.encode(Y, U, V);
-    self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: performance.now() - t0 }, [pkt.bits.buffer]);
+    const t2 = performance.now();
+    self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0 }, [pkt.bits.buffer]);
   },
   newClip() {
     enc.newClip();

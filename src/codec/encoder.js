@@ -7,11 +7,12 @@
 import { BitWriter, extractBits, seBits } from './bitio.js';
 import { ZIGZAG4x4, CBP_INTER_TO_CODE, CHROMA_QP } from './tables.js';
 import { writeResidualBlock } from './cavlc.js';
-import { makeRef, buildRef, predLuma, predChroma } from './inter.js';
+import { makeRef, buildRef, predLuma, predChroma, sadLuma } from './inter.js';
 import { makeMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
 import {
   MbResidual, reconInterMB, forward4x4, quant4x4, hadamard2x2, quantChromaDC,
 } from './transform.js';
+import { QUANT_MF } from './tables.js';
 import { align16, writeSliceHeader, headerForFrame } from './headers.js';
 
 // Plan §7.2. Each value makes a datamosh.
@@ -44,6 +45,19 @@ const LARGE_SEARCH_SAD = 256 * 6;
 
 const LAMBDA = new Float64Array(52);
 for (let q = 0; q < 52; q++) LAMBDA[q] = Math.sqrt(0.85 * 2 ** ((q - 12) / 3));
+
+// ZERO_SAD[qp]: when the sum of |residual| of a 4x4 block is at most this value, all its levels are
+// zero, so the transform is not necessary. Proof: |W| <= S for positions (even, even), 4S for
+// (odd, odd), 2S for the others (the core transform has |c| <= 2), and a level is zero when
+// |W| * MF + f < 2^qbits. The result is exactly the same as with the transform.
+const ZERO_SAD = new Int32Array(52);
+for (let q = 0; q < 52; q++) {
+  const qbits = 15 + ((q / 6) | 0);
+  const f = ((1 << qbits) / 6) | 0;
+  const mf = QUANT_MF[q % 6];
+  const k = Math.max(mf[0], 4 * mf[1], 2 * mf[2]);
+  ZERO_SAD[q] = Math.floor(((1 << qbits) - f - 1) / k);
+}
 
 const SMALL_DIAMOND = [0, -1, -1, 0, 1, 0, 0, 1];
 const LARGE_DIAMOND = [0, -2, -1, -1, 1, -1, -2, 0, 2, 0, -1, 1, 1, 1, 0, 2];
@@ -80,6 +94,8 @@ export class Encoder {
     this.scan = new Int32Array(16);
     this.dc = new Int32Array(4);
     this.dcF = new Int32Array(4);
+    this.visited = new Int32Array(129 * 129); // motion search: positions tested for this MB
+    this.visitStamp = 0;
     this.nextType = 'idr';
     this.hasRef = false;
     // Test hooks (not used by the app):
@@ -206,13 +222,13 @@ export class Encoder {
     return sad;
   }
 
-  // SAD at a full-sample vector (ix, iy) in samples.
-  sadInt(Y, yOff, mbx, mby, ix, iy) {
+  // SAD at a full-sample vector (ix, iy) in samples. It stops (and returns a value > limit) as soon
+  // as the sum is above limit.
+  sadInt(Y, yOff, mbx, mby, ix, iy, limit = Infinity) {
     const ref = this.ref;
     const x = mbx * 16 + ix, y = mby * 16 + iy;
     if (x < -ref.pad || y < -ref.pad || x + 16 > ref.w + ref.pad || y + 16 > ref.h + ref.pad) {
-      predLuma(ref, mbx * 16, mby * 16, ix * 4, iy * 4, 16, 16, this.tmpY);
-      return this.sadPred(Y, yOff, this.tmpY);
+      return sadLuma(ref, mbx * 16, mby * 16, ix * 4, iy * 4, Y, yOff, this.codedW, limit, this.tmpY);
     }
     const G = ref.G, rs = ref.stride, W = this.codedW;
     let o = ref.origin + y * rs + x;
@@ -223,6 +239,7 @@ export class Encoder {
         const d = Y[s + c] - G[o + c];
         sad += d < 0 ? -d : d;
       }
+      if (sad > limit) return sad;
       o += rs;
     }
     return sad;
@@ -238,12 +255,23 @@ export class Encoder {
     const res = this.res;
     const W = this.codedW, cW = W >> 1;
     const blk = this.blk, wc = this.wc, zc = this.zc;
+    const zeroL = ZERO_SAD[qp];
     let cbp = 0;
     for (let b = 0; b < 16; b++) {
       const bx = b & 3, by = b >> 2;
       const s = yOff + by * 4 * W + bx * 4, p = by * 64 + bx * 4;
+      let sa = 0;
       for (let y = 0; y < 4; y++) {
-        for (let x = 0; x < 4; x++) blk[y * 4 + x] = Y[s + y * W + x] - this.predY[p + y * 16 + x];
+        for (let x = 0; x < 4; x++) {
+          const d = Y[s + y * W + x] - this.predY[p + y * 16 + x];
+          blk[y * 4 + x] = d;
+          sa += d < 0 ? -d : d;
+        }
+      }
+      if (sa <= zeroL) {
+        res.luma.fill(0, b * 16, b * 16 + 16);
+        res.nzLuma[b] = 0;
+        continue;
       }
       forward4x4(blk, wc);
       const nz = quant4x4(wc, qp, zc, 0);
@@ -252,6 +280,7 @@ export class Encoder {
       if (nz) cbp |= 1 << ((by >> 1) * 2 + (bx >> 1));
     }
     const qpc = CHROMA_QP[qp];
+    const zeroC = ZERO_SAD[qpc];
     let anyDC = false, anyAC = false;
     for (let comp = 0; comp < 2; comp++) {
       const P = comp ? V : U, pred = comp ? this.predV : this.predU;
@@ -259,8 +288,20 @@ export class Encoder {
       for (let b = 0; b < 4; b++) {
         const bx = b & 1, by = b >> 1;
         const s = cOff + by * 4 * cW + bx * 4, p = by * 32 + bx * 4;
+        let sa = 0, sum = 0;
         for (let y = 0; y < 4; y++) {
-          for (let x = 0; x < 4; x++) blk[y * 4 + x] = P[s + y * cW + x] - pred[p + y * 8 + x];
+          for (let x = 0; x < 4; x++) {
+            const d = P[s + y * cW + x] - pred[p + y * 8 + x];
+            blk[y * 4 + x] = d;
+            sum += d;
+            sa += d < 0 ? -d : d;
+          }
+        }
+        if (sa <= zeroC) {
+          this.dc[b] = sum; // W[0] is the sum of the residual
+          ac.fill(0, b * 16, b * 16 + 16);
+          nzc[b] = 0;
+          continue;
         }
         forward4x4(blk, wc);
         this.dc[b] = wc[0];
@@ -288,21 +329,39 @@ export class Encoder {
   residualIsZero(Y, U, V, yOff, cOff, qp) {
     const W = this.codedW, cW = W >> 1;
     const blk = this.blk, wc = this.wc, zc = this.zc;
+    const zeroL = ZERO_SAD[qp];
     for (let b = 0; b < 16; b++) {
       const s = yOff + (b >> 2) * 4 * W + (b & 3) * 4, p = (b >> 2) * 64 + (b & 3) * 4;
+      let sa = 0;
       for (let y = 0; y < 4; y++) {
-        for (let x = 0; x < 4; x++) blk[y * 4 + x] = Y[s + y * W + x] - this.predY[p + y * 16 + x];
+        for (let x = 0; x < 4; x++) {
+          const d = Y[s + y * W + x] - this.predY[p + y * 16 + x];
+          blk[y * 4 + x] = d;
+          sa += d < 0 ? -d : d;
+        }
       }
+      if (sa <= zeroL) continue;
       forward4x4(blk, wc);
       if (quant4x4(wc, qp, zc, 0)) return false;
     }
     const qpc = CHROMA_QP[qp];
+    const zeroC = ZERO_SAD[qpc];
     for (let comp = 0; comp < 2; comp++) {
       const P = comp ? V : U, pred = comp ? this.predV : this.predU;
       for (let b = 0; b < 4; b++) {
         const s = cOff + (b >> 1) * 4 * cW + (b & 1) * 4, p = (b >> 1) * 32 + (b & 1) * 4;
+        let sa = 0, sum = 0;
         for (let y = 0; y < 4; y++) {
-          for (let x = 0; x < 4; x++) blk[y * 4 + x] = P[s + y * cW + x] - pred[p + y * 8 + x];
+          for (let x = 0; x < 4; x++) {
+            const d = P[s + y * cW + x] - pred[p + y * 8 + x];
+            blk[y * 4 + x] = d;
+            sum += d;
+            sa += d < 0 ? -d : d;
+          }
+        }
+        if (sa <= zeroC) {
+          this.dc[b] = sum;
+          continue;
         }
         forward4x4(blk, wc);
         this.dc[b] = wc[0];
@@ -325,9 +384,17 @@ export class Encoder {
     const rnd = (v) => clampI((v + 2) >> 2);
 
     let bx = 0, by = 0, bSad = 0, bCost = Infinity;
+    // A position tested before gives the same cost again, so it is not tested again.
+    const visited = this.visited;
+    const stamp = ++this.visitStamp;
     const tryInt = (ix, iy) => {
-      const sad = this.sadInt(Y, yOff, mbx, mby, ix, iy);
-      const cost = sad + lambda * (seBits(ix * 4 - px) + seBits(iy * 4 - py));
+      const vi = (iy + 64) * 129 + ix + 64;
+      if (visited[vi] === stamp) return false;
+      visited[vi] = stamp;
+      const rate = lambda * (seBits(ix * 4 - px) + seBits(iy * 4 - py));
+      // Stop the SAD when it cannot give a lower cost (+0.5: no float rounding risk).
+      const sad = this.sadInt(Y, yOff, mbx, mby, ix, iy, bCost - rate + 0.5);
+      const cost = sad + rate;
       if (cost < bCost) {
         bCost = cost;
         bSad = sad;
@@ -376,8 +443,9 @@ export class Encoder {
         for (let k = 0; k < 16; k += 2) {
           const qx = cx + RING[k] * st, qy = cy + RING[k + 1] * st;
           if (qx < -R4 || qx > R4 || qy < -R4 || qy > R4) continue;
-          const sad = this.sadFrac(Y, yOff, mbx, mby, qx, qy);
-          const cost = sad + lambda * (seBits(qx - px) + seBits(qy - py));
+          const rate = lambda * (seBits(qx - px) + seBits(qy - py));
+          const sad = sadLuma(this.ref, mbx * 16, mby * 16, qx, qy, Y, yOff, this.codedW, bCost - rate + 0.5, this.tmpY);
+          const cost = sad + rate;
           if (cost < bCost) {
             bCost = cost;
             bSad = sad;

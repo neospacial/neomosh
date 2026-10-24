@@ -2,7 +2,8 @@
 // References: H.264 8.4.2.2.1 (luma) and 8.4.2.2.2 (chroma).
 //
 // A reference frame is kept as padded planes. The padding copies the edge samples. The half-sample
-// planes B (horizontal), H (vertical), and J (center) are computed once for each reference frame.
+// planes B (horizontal), H (vertical), and J (center) are computed once for each reference frame,
+// when a fractional vector first needs them.
 // Coordinates outside the padded area are clamped to it. This gives exactly the spec result
 // (edge clamp, unrestricted motion vectors), because the padding is wider than the filter taps.
 
@@ -26,8 +27,8 @@ export function makeRef(w, h) {
     cw, ch, cpad, cstride, corigin: cpad * cstride + cpad,
     U: new Uint8Array(cstride * crows),
     V: new Uint8Array(cstride * crows),
-    ext: new Int32Array(stride + 5),
     h1row: new Int32Array(stride + 5),
+    halfReady: false,
   };
 }
 
@@ -46,29 +47,32 @@ function padPlaneInto(src, w, h, dst, pad, stride) {
 
 // Fill the reference planes from a decoded picture (Y: w*h, U/V: w/2*h/2).
 export function buildRef(ref, Y, U, V) {
-  const { w, h, pad, stride, G, B, H, J } = ref;
-  padPlaneInto(Y, w, h, G, pad, stride);
+  padPlaneInto(Y, ref.w, ref.h, ref.G, ref.pad, ref.stride);
   padPlaneInto(U, ref.cw, ref.ch, ref.U, ref.cpad, ref.cstride);
   padPlaneInto(V, ref.cw, ref.ch, ref.V, ref.cpad, ref.cstride);
-  const PW = stride;
+  ref.halfReady = false;
+}
+
+// The half-sample planes B, H, and J of the padded plane G.
+export function buildHalf(ref) {
+  const { h, pad, stride: PW, G, B, H, J } = ref;
   const PH = h + 2 * pad;
-  // Row buffers with 2 extra samples on the left and 3 on the right (edge copies).
-  const ext = ref.ext;
-  const h1 = ref.h1row;
+  const h1 = ref.h1row; // unrounded vertical values, with 2 edge copies on the left and 3 on the right
+  const last = PW - 1;
   for (let r = 0; r < PH; r++) {
     const ro = r * PW;
-    // B: horizontal half sample between G(x) and G(x+1).
-    for (let i = 0; i < PW; i++) ext[i + 2] = G[ro + i];
-    ext[0] = ext[1] = ext[2];
-    ext[PW + 2] = ext[PW + 3] = ext[PW + 4] = ext[PW + 1];
-    let e0 = ext[0], e1 = ext[1], e2 = ext[2], e3 = ext[3], e4 = ext[4];
+    // B: horizontal half sample between G(x) and G(x+1). The columns at the edges are clamped.
     for (let x = 0; x < PW; x++) {
-      const e5 = ext[x + 5];
-      const v = (e0 + e5 - 5 * (e1 + e4) + 20 * (e2 + e3) + 16) >> 5;
+      if (x === 2) x = last - 2; // the inner columns are done in the next loop
+      const g = (k) => G[ro + (k < 0 ? 0 : k > last ? last : k)];
+      const v = (g(x - 2) + g(x + 3) - 5 * (g(x - 1) + g(x + 2)) + 20 * (g(x) + g(x + 1)) + 16) >> 5;
       B[ro + x] = v < 0 ? 0 : v > 255 ? 255 : v;
-      e0 = e1; e1 = e2; e2 = e3; e3 = e4; e4 = e5;
     }
-    // H: vertical half sample between G(y) and G(y+1). h1 keeps the unrounded value for J.
+    for (let o = ro + 2, end = ro + last - 2; o < end; o++) {
+      const v = (G[o - 2] + G[o + 3] - 5 * (G[o - 1] + G[o + 2]) + 20 * (G[o] + G[o + 1]) + 16) >> 5;
+      B[o] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    // H: vertical half sample between G(y) and G(y+1).
     const rm2 = (r - 2 < 0 ? 0 : r - 2) * PW;
     const rm1 = (r - 1 < 0 ? 0 : r - 1) * PW;
     const rp1 = (r + 1 >= PH ? PH - 1 : r + 1) * PW;
@@ -83,14 +87,12 @@ export function buildRef(ref, Y, U, V) {
     h1[0] = h1[1] = h1[2];
     h1[PW + 2] = h1[PW + 3] = h1[PW + 4] = h1[PW + 1];
     // J: center sample, from the unrounded vertical values.
-    e0 = h1[0]; e1 = h1[1]; e2 = h1[2]; e3 = h1[3]; e4 = h1[4];
     for (let x = 0; x < PW; x++) {
-      const e5 = h1[x + 5];
-      const v = (e0 + e5 - 5 * (e1 + e4) + 20 * (e2 + e3) + 512) >> 10;
+      const v = (h1[x] + h1[x + 5] - 5 * (h1[x + 1] + h1[x + 4]) + 20 * (h1[x + 2] + h1[x + 3]) + 512) >> 10;
       J[ro + x] = v < 0 ? 0 : v > 255 ? 255 : v;
-      e0 = e1; e1 = e2; e2 = e3; e3 = e4; e4 = e5;
     }
   }
+  ref.halfReady = true;
 }
 
 // For each fraction (yFrac * 4 + xFrac): the two source samples to average, as
@@ -126,6 +128,7 @@ const rowIdx = new Int32Array(24);
 // Luma prediction of a bw x bh block at picture position (x, y) with a quarter-sample vector.
 // out has stride bw.
 export function predLuma(ref, x, y, mvx, mvy, bw, bh, out) {
+  if ((mvx | mvy) & 3 && !ref.halfReady) buildHalf(ref);
   const xi = x + (mvx >> 2);
   const yi = y + (mvy >> 2);
   const f = FRAC[((mvy & 3) << 2) | (mvx & 3)];
@@ -166,6 +169,58 @@ export function predLuma(ref, x, y, mvx, mvy, bw, bh, out) {
       out[r * bw + c] = two ? (a + P2[rowIdx[r + f[5]] + colIdx[c + f[4]]] + 1) >> 1 : a;
     }
   }
+}
+
+// SAD of the 16x16 luma prediction against the source Y (stride yStride, offset yOff), without
+// writing the prediction. It stops (and returns a value > limit) when the sum is above limit.
+// The values are the same as predLuma; tmp (256 bytes) is used for the slow path only.
+export function sadLuma(ref, x, y, mvx, mvy, Y, yOff, yStride, limit, tmp) {
+  if ((mvx | mvy) & 3 && !ref.halfReady) buildHalf(ref);
+  const xi = x + (mvx >> 2);
+  const yi = y + (mvy >> 2);
+  const { pad, stride, w, h } = ref;
+  let sad = 0;
+  if (!(xi >= -pad && yi >= -pad && xi + 17 <= w + pad && yi + 17 <= h + pad)) {
+    predLuma(ref, x, y, mvx, mvy, 16, 16, tmp);
+    for (let r = 0; r < 16; r++) {
+      const s = yOff + r * yStride;
+      for (let c = 0; c < 16; c++) {
+        const d = Y[s + c] - tmp[r * 16 + c];
+        sad += d < 0 ? -d : d;
+      }
+      if (sad > limit) return sad;
+    }
+    return sad;
+  }
+  const f = FRAC[((mvy & 3) << 2) | (mvx & 3)];
+  const P1 = planeOf(ref, f[0]);
+  const base = ref.origin + yi * stride + xi;
+  let o1 = base + f[2] * stride + f[1];
+  if (f[3] < 0) {
+    for (let r = 0; r < 16; r++) {
+      const s = yOff + r * yStride;
+      for (let c = 0; c < 16; c++) {
+        const d = Y[s + c] - P1[o1 + c];
+        sad += d < 0 ? -d : d;
+      }
+      if (sad > limit) return sad;
+      o1 += stride;
+    }
+    return sad;
+  }
+  const P2 = planeOf(ref, f[3]);
+  let o2 = base + f[5] * stride + f[4];
+  for (let r = 0; r < 16; r++) {
+    const s = yOff + r * yStride;
+    for (let c = 0; c < 16; c++) {
+      const d = Y[s + c] - ((P1[o1 + c] + P2[o2 + c] + 1) >> 1);
+      sad += d < 0 ? -d : d;
+    }
+    if (sad > limit) return sad;
+    o1 += stride;
+    o2 += stride;
+  }
+  return sad;
 }
 
 // Chroma prediction (both components) of a bw x bh block at chroma position (x, y).

@@ -50,7 +50,8 @@ export class Recorder {
     this.drops = 0;
     this.clipDrops = 0;
     this.seq = 0;
-    this.encMs = 0;
+    this.encMs = 0; // average time in the encoder worker for each frame
+    this.grabMs = 0; // the part for drawing, reading the pixels, and RGB to YUV
   }
 
   setState(s) {
@@ -212,6 +213,7 @@ export class Recorder {
     if (m.cmd !== 'packet') return;
     this.encInFlight--;
     this.encMs = this.encMs ? this.encMs * 0.9 + m.ms * 0.1 : m.ms;
+    this.grabMs = this.grabMs ? this.grabMs * 0.9 + m.grabMs * 0.1 : m.grabMs;
     const pkt = m.pkt;
     const index = this.frameCount++;
     if (pkt.type === 'hiddenI') this.cuts.push(index);
