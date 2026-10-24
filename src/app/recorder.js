@@ -423,7 +423,11 @@ export class Recorder {
   // R-25.
   lockScreen() {
     if (!navigator.wakeLock || !navigator.wakeLock.request) return;
-    navigator.wakeLock.request('screen').then((w) => (this.wake = w)).catch(() => {});
+    navigator.wakeLock.request('screen').then((w) => {
+      // The recording can pause before the lock arrives: then release it at once.
+      if (this.state === ST.RECORDING) this.wake = w;
+      else w.release().catch(() => {});
+    }).catch(() => {});
   }
 
   unlockScreen() {

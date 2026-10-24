@@ -42,6 +42,20 @@ async function openApp(name) {
   const srv = await serve(OUT_DIR);
   const browser = await chromium.launch({ args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
+  // Count the JavaScript callbacks (timers, frames) and the messages to the workers.
+  await ctx.addInitScript(() => {
+    window.__activity = { timers: 0, frames: 0, workerPosts: 0 };
+    const a = window.__activity;
+    const wrap = (fn, key) => (typeof fn === 'function' ? function (...x) { a[key]++; return fn.apply(this, x); } : fn);
+    const st = window.setTimeout, si = window.setInterval, raf = window.requestAnimationFrame;
+    window.setTimeout = (fn, ...r) => st(wrap(fn, 'timers'), ...r);
+    window.setInterval = (fn, ...r) => si(wrap(fn, 'timers'), ...r);
+    window.requestAnimationFrame = (fn) => raf(wrap(fn, 'frames'));
+    const rvfc = HTMLVideoElement.prototype.requestVideoFrameCallback;
+    if (rvfc) HTMLVideoElement.prototype.requestVideoFrameCallback = function (fn) { return rvfc.call(this, wrap(fn, 'frames')); };
+    const post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (...x) { a.workerPosts++; return post.apply(this, x); };
+  });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -161,6 +175,12 @@ export const tests = [
         await h.shot('paused');
         await h.clip(1500);
         assert(!(await page.isVisible('#mosh')), 'the decoded viewfinder must hide when paused');
+        // Nothing runs while paused: no timers, no frame callbacks, no work for the workers.
+        await page.waitForTimeout(3000); // the last toast and storage timers end
+        const act0 = await page.evaluate(() => ({ ...window.__activity }));
+        await page.waitForTimeout(2000);
+        const act1 = await page.evaluate(() => ({ ...window.__activity }));
+        assert(JSON.stringify(act0) === JSON.stringify(act1), `activity while paused: ${JSON.stringify(act0)} -> ${JSON.stringify(act1)}`);
         const overlay = await h.canvas('overlay');
 
         const db = await h.db();

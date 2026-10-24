@@ -362,8 +362,17 @@ function nudgeExposure(dy) {
 
 /* ---------------- recorder ---------------- */
 
+let pillTimer = 0;
+
 function onState(st) {
   el.body.setAttribute('data-state', st);
+  // The time in the pill changes only while recording. No timer runs in the other states.
+  const ticking = st === ST.RECORDING || st === ST.PAUSING;
+  if (ticking && !pillTimer) pillTimer = setInterval(updatePill, 250);
+  if (!ticking && pillTimer) {
+    clearInterval(pillTimer);
+    pillTimer = 0;
+  }
   if (rec && !rec.drops) el.body.removeAttribute('data-drops');
   if (rec && st === ST.IDLE && !rec.hasFrames && el.thumbImg.src) {
     URL.revokeObjectURL(el.thumbImg.src);
@@ -381,7 +390,6 @@ function updatePill() {
   } else el.timer.textContent = formatTime(rec.timeUs);
   el.clipLbl.textContent = rec.clip ? '· clip ' + rec.clip : '';
 }
-setInterval(updatePill, 250);
 
 function onDecoded(bitmap) {
   const c = el.mosh;
@@ -469,7 +477,10 @@ function openSheet(name) {
 
 function closeSheet() {
   const sheet = el.body.getAttribute('data-sheet');
-  if (sheet === 'export' && exportCtl) exportCtl.abort();
+  if (sheet === 'export') {
+    if (exportCtl) exportCtl.abort();
+    exportBlob = null; // release the file from memory
+  }
   if (sheet === 'review') closeReview();
   el.body.removeAttribute('data-sheet');
 }
