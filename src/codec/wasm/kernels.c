@@ -24,7 +24,6 @@ static const int QUANT_MF[6][3] = {
 static const int DEQUANT_V[6][3] = {
   {10, 16, 13}, {11, 18, 14}, {13, 20, 16}, {14, 23, 18}, {16, 25, 20}, {18, 29, 23},
 };
-static const u8 POS_CLASS[16] = {0, 2, 0, 2, 2, 1, 2, 1, 0, 2, 0, 2, 2, 1, 2, 1};
 static const u8 CHROMA_QP[52] = {
   0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
   26, 27, 28, 29, 29, 30, 31, 32, 32, 33, 34, 34, 35, 35, 36, 36, 37, 37, 37, 38, 38, 38, 39, 39,
@@ -374,40 +373,6 @@ int search_mb(i32 *R, const u8 *src, int ss, int mbx, int mby, int range, double
 
 /* ---------------- transform and quantization (transform.js) ---------------- */
 
-static void forward4x4(const int *r, int *w) {
-  int t[16];
-  for (int y = 0; y < 4; y++) {
-    const int o = y * 4, a = r[o], b = r[o + 1], c = r[o + 2], d = r[o + 3];
-    const int s03 = a + d, d03 = a - d, s12 = b + c, d12 = b - c;
-    t[o] = s03 + s12;
-    t[o + 1] = 2 * d03 + d12;
-    t[o + 2] = s03 - s12;
-    t[o + 3] = d03 - 2 * d12;
-  }
-  for (int x = 0; x < 4; x++) {
-    const int a = t[x], b = t[4 + x], c = t[8 + x], d = t[12 + x];
-    const int s03 = a + d, d03 = a - d, s12 = b + c, d12 = b - c;
-    w[x] = s03 + s12;
-    w[4 + x] = 2 * d03 + d12;
-    w[8 + x] = s03 - s12;
-    w[12 + x] = d03 - 2 * d12;
-  }
-}
-
-static int quant4x4(const int *w, int qp, i32 *z, int first) {
-  const int qbits = 15 + qp / 6, f = (1 << qbits) / 6;
-  const int *mf = QUANT_MF[qp % 6];
-  int nz = 0;
-  if (first) z[0] = 0;
-  for (int i = first; i < 16; i++) {
-    const int v = w[i], a = v < 0 ? -v : v;
-    const int q = (a * mf[POS_CLASS[i]] + f) >> qbits;
-    z[i] = v < 0 ? -q : q;
-    if (q) nz++;
-  }
-  return nz;
-}
-
 static void hadamard2x2(const int *c, int *f) {
   f[0] = c[0] + c[1] + c[2] + c[3];
   f[1] = c[0] - c[1] + c[2] - c[3];
@@ -438,6 +403,104 @@ static int zero_sad(int q) {
   return ((1 << qbits) - f - 1) / k;
 }
 
+/* SIMD 4x4 blocks: four i32x4 vectors, one for each row (lanes = columns). The forward transform is
+   exact integer arithmetic, so the order of the passes does not change it. The inverse transform does
+   the rows first, then the columns, as in 8.5.12.2 (the >> 1 makes the order matter). */
+#define TR4(a, b, c, d)                                                          \
+  do {                                                                           \
+    v128_t t0_ = wasm_i32x4_shuffle(a, b, 0, 4, 1, 5), t1_ = wasm_i32x4_shuffle(a, b, 2, 6, 3, 7); \
+    v128_t t2_ = wasm_i32x4_shuffle(c, d, 0, 4, 1, 5), t3_ = wasm_i32x4_shuffle(c, d, 2, 6, 3, 7); \
+    a = wasm_i32x4_shuffle(t0_, t2_, 0, 1, 4, 5);                                \
+    b = wasm_i32x4_shuffle(t0_, t2_, 2, 3, 6, 7);                                \
+    c = wasm_i32x4_shuffle(t1_, t3_, 0, 1, 4, 5);                                \
+    d = wasm_i32x4_shuffle(t1_, t3_, 2, 3, 6, 7);                                \
+  } while (0)
+
+static inline v128_t ld4_u32(const u8 *p) {
+  return wasm_u32x4_extend_low_u16x8(wasm_u16x8_extend_low_u8x16(wasm_v128_load32_zero(p)));
+}
+
+// The residual rows of a 4x4 block (src stride ss, pred stride ps). Returns the sum of |residual|.
+static inline int res_rows(const u8 *s, int ss, const u8 *p, int ps, v128_t *r) {
+  v128_t acc = wasm_i32x4_splat(0);
+  for (int y = 0; y < 4; y++) {
+    r[y] = wasm_i32x4_sub(ld4_u32(s + y * ss), ld4_u32(p + y * ps));
+    acc = wasm_i32x4_add(acc, wasm_i32x4_abs(r[y]));
+  }
+  return hsum(acc);
+}
+
+static inline void fwd_pass(v128_t *x) {
+  const v128_t s03 = wasm_i32x4_add(x[0], x[3]), d03 = wasm_i32x4_sub(x[0], x[3]);
+  const v128_t s12 = wasm_i32x4_add(x[1], x[2]), d12 = wasm_i32x4_sub(x[1], x[2]);
+  x[0] = wasm_i32x4_add(s03, s12);
+  x[1] = wasm_i32x4_add(wasm_i32x4_shl(d03, 1), d12);
+  x[2] = wasm_i32x4_sub(s03, s12);
+  x[3] = wasm_i32x4_sub(d03, wasm_i32x4_shl(d12, 1));
+}
+
+// forward4x4 in place: r (rows) -> W (rows = vertical frequency, lanes = horizontal frequency).
+static inline void fwd4x4_v(v128_t *r) {
+  fwd_pass(r); // columns
+  TR4(r[0], r[1], r[2], r[3]);
+  fwd_pass(r); // rows
+  TR4(r[0], r[1], r[2], r[3]);
+}
+
+// quant4x4 of W (rows). Writes z (raster). first = 1: z[0] = 0 and not counted. Returns nz.
+static inline int quant4x4_v(const v128_t *w, int qp, i32 *z, int first) {
+  const int qbits = 15 + qp / 6;
+  const v128_t f = wasm_i32x4_splat((1 << qbits) / 6);
+  const int *mf = QUANT_MF[qp % 6];
+  const v128_t mfE = wasm_i32x4_make(mf[0], mf[2], mf[0], mf[2]), mfO = wasm_i32x4_make(mf[2], mf[1], mf[2], mf[1]);
+  int nz = 0;
+  for (int y = 0; y < 4; y++) {
+    const v128_t a = wasm_i32x4_abs(w[y]);
+    const v128_t q = wasm_i32x4_shr(wasm_i32x4_add(wasm_i32x4_mul(a, (y & 1) ? mfO : mfE), f), qbits);
+    const v128_t sg = wasm_i32x4_shr(w[y], 31);
+    wasm_v128_store(z + y * 4, wasm_i32x4_sub(wasm_v128_xor(q, sg), sg));
+    nz += __builtin_popcount(wasm_i32x4_bitmask(wasm_i32x4_ne(q, wasm_i32x4_splat(0))));
+  }
+  if (first) {
+    if (z[0]) nz--;
+    z[0] = 0;
+  }
+  return nz;
+}
+
+static inline void inv_pass(v128_t *x) {
+  const v128_t e0 = wasm_i32x4_add(x[0], x[2]), e1 = wasm_i32x4_sub(x[0], x[2]);
+  const v128_t e2 = wasm_i32x4_sub(wasm_i32x4_shr(x[1], 1), x[3]), e3 = wasm_i32x4_add(x[1], wasm_i32x4_shr(x[3], 1));
+  x[0] = wasm_i32x4_add(e0, e3);
+  x[1] = wasm_i32x4_add(e1, e2);
+  x[2] = wasm_i32x4_sub(e1, e2);
+  x[3] = wasm_i32x4_sub(e0, e3);
+}
+
+// dequant4x4 + idct4x4Add: c levels (raster), dc: the value for d[0] when useDC (chroma).
+static inline void recon4x4_v(const i32 *c, int qp, int useDC, int dc, int acZero, const u8 *pred, int ps, u8 *dst, int ds) {
+  v128_t d[4];
+  if (acZero) {
+    for (int y = 0; y < 4; y++) d[y] = wasm_i32x4_splat(0);
+  } else {
+    const int *v = DEQUANT_V[qp % 6];
+    const int sh = qp / 6;
+    const v128_t vE = wasm_i32x4_make(v[0], v[2], v[0], v[2]), vO = wasm_i32x4_make(v[2], v[1], v[2], v[1]);
+    for (int y = 0; y < 4; y++) d[y] = wasm_i32x4_shl(wasm_i32x4_mul(wasm_v128_load(c + y * 4), (y & 1) ? vO : vE), sh);
+  }
+  if (useDC) d[0] = wasm_i32x4_replace_lane(d[0], 0, dc);
+  TR4(d[0], d[1], d[2], d[3]); // vectors = columns: the row pass works across them
+  inv_pass(d);
+  TR4(d[0], d[1], d[2], d[3]); // vectors = rows: the column pass
+  inv_pass(d);
+  const v128_t k32 = wasm_i32x4_splat(32);
+  for (int y = 0; y < 4; y++) {
+    const v128_t r = wasm_i32x4_add(ld4_u32(pred + y * ps), wasm_i32x4_shr(wasm_i32x4_add(d[y], k32), 6));
+    const v128_t n16 = wasm_i16x8_narrow_i32x4(r, r);
+    wasm_v128_store32_lane(dst + y * ds, wasm_u8x16_narrow_i16x8(n16, n16), 0);
+  }
+}
+
 /* MB residual (transform.js MbResidual), i32: luma[256] (block b = by*4+bx, raster levels),
    cb[64], cr[64] (AC; index 0 unused), cbDC[4], crDC[4], nzLuma[16], nzCb[4], nzCr[4], cbp. */
 enum { RES_LUMA = 0, RES_CB = 256, RES_CR = 320, RES_CBDC = 384, RES_CRDC = 388, RES_NZL = 392, RES_NZCB = 408, RES_NZCR = 412, RES_CBP = 416, RES_SIZE = 417 };
@@ -445,29 +508,20 @@ enum { RES_LUMA = 0, RES_CB = 256, RES_CR = 320, RES_CBDC = 384, RES_CRDC = 388,
 // encoder.js residual(): src* point to the MB (luma stride W, chroma stride cW). Returns cbp.
 EXPORT(residual_mb)
 int residual_mb(const u8 *sY, const u8 *sU, const u8 *sV, int W, int cW, const u8 *pY, const u8 *pU, const u8 *pV, int qp, i32 *res) {
-  int blk[16], wc[16];
   const int zeroL = zero_sad(qp);
   int cbp = 0;
   for (int b = 0; b < 16; b++) {
     const int bx = b & 3, by = b >> 2;
-    const u8 *s = sY + by * 4 * W + bx * 4;
-    const u8 *p = pY + by * 64 + bx * 4;
-    int sa = 0;
-    for (int y = 0; y < 4; y++) {
-      for (int x = 0; x < 4; x++) {
-        const int d = s[y * W + x] - p[y * 16 + x];
-        blk[y * 4 + x] = d;
-        sa += d < 0 ? -d : d;
-      }
-    }
+    v128_t r[4];
+    const int sa = res_rows(sY + by * 4 * W + bx * 4, W, pY + by * 64 + bx * 4, 16, r);
     i32 *z = res + RES_LUMA + b * 16;
     if (sa <= zeroL) {
-      for (int i = 0; i < 16; i++) z[i] = 0;
+      for (int i = 0; i < 16; i += 4) wasm_v128_store(z + i, wasm_i32x4_splat(0));
       res[RES_NZL + b] = 0;
       continue;
     }
-    forward4x4(blk, wc);
-    const int nz = quant4x4(wc, qp, z, 0);
+    fwd4x4_v(r);
+    const int nz = quant4x4_v(r, qp, z, 0);
     res[RES_NZL + b] = nz;
     if (nz) cbp |= 1 << ((by >> 1) * 2 + (bx >> 1));
   }
@@ -480,26 +534,17 @@ int residual_mb(const u8 *sY, const u8 *sU, const u8 *sV, int W, int cW, const u
     int dc[4], dcF[4];
     for (int b = 0; b < 4; b++) {
       const int bx = b & 1, by = b >> 1;
-      const u8 *s = P + by * 4 * cW + bx * 4;
-      const u8 *p = pred + by * 32 + bx * 4;
-      int sa = 0, sum = 0;
-      for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 4; x++) {
-          const int d = s[y * cW + x] - p[y * 8 + x];
-          blk[y * 4 + x] = d;
-          sum += d;
-          sa += d < 0 ? -d : d;
-        }
-      }
+      v128_t r[4];
+      const int sa = res_rows(P + by * 4 * cW + bx * 4, cW, pred + by * 32 + bx * 4, 8, r);
       if (sa <= zeroC) {
-        dc[b] = sum;
-        for (int i = 0; i < 16; i++) ac[b * 16 + i] = 0;
+        dc[b] = hsum(wasm_i32x4_add(wasm_i32x4_add(r[0], r[1]), wasm_i32x4_add(r[2], r[3]))); // W[0] = the sum
+        for (int i = 0; i < 16; i += 4) wasm_v128_store(ac + b * 16 + i, wasm_i32x4_splat(0));
         nzc[b] = 0;
         continue;
       }
-      forward4x4(blk, wc);
-      dc[b] = wc[0];
-      const int nz = quant4x4(wc, qpc, ac + b * 16, 1);
+      fwd4x4_v(r);
+      dc[b] = wasm_i32x4_extract_lane(r[0], 0);
+      const int nz = quant4x4_v(r, qpc, ac + b * 16, 1);
       nzc[b] = nz;
       if (nz) anyAC = 1;
     }
@@ -519,23 +564,14 @@ int residual_mb(const u8 *sY, const u8 *sU, const u8 *sV, int W, int cW, const u
 // encoder.js residualIsZero(): 1 when all levels of the prediction are zero.
 EXPORT(residual_is_zero)
 int residual_is_zero(const u8 *sY, const u8 *sU, const u8 *sV, int W, int cW, const u8 *pY, const u8 *pU, const u8 *pV, int qp) {
-  int blk[16], wc[16];
   i32 zc[16];
   const int zeroL = zero_sad(qp);
   for (int b = 0; b < 16; b++) {
-    const u8 *s = sY + (b >> 2) * 4 * W + (b & 3) * 4;
-    const u8 *p = pY + (b >> 2) * 64 + (b & 3) * 4;
-    int sa = 0;
-    for (int y = 0; y < 4; y++) {
-      for (int x = 0; x < 4; x++) {
-        const int d = s[y * W + x] - p[y * 16 + x];
-        blk[y * 4 + x] = d;
-        sa += d < 0 ? -d : d;
-      }
-    }
+    v128_t r[4];
+    const int sa = res_rows(sY + (b >> 2) * 4 * W + (b & 3) * 4, W, pY + (b >> 2) * 64 + (b & 3) * 4, 16, r);
     if (sa <= zeroL) continue;
-    forward4x4(blk, wc);
-    if (quant4x4(wc, qp, zc, 0)) return 0;
+    fwd4x4_v(r);
+    if (quant4x4_v(r, qp, zc, 0)) return 0;
   }
   const int qpc = CHROMA_QP[qp];
   const int zeroC = zero_sad(qpc);
@@ -543,52 +579,20 @@ int residual_is_zero(const u8 *sY, const u8 *sU, const u8 *sV, int W, int cW, co
     const u8 *P = comp ? sV : sU, *pred = comp ? pV : pU;
     int dc[4], dcF[4];
     for (int b = 0; b < 4; b++) {
-      const u8 *s = P + (b >> 1) * 4 * cW + (b & 1) * 4;
-      const u8 *p = pred + (b >> 1) * 32 + (b & 1) * 4;
-      int sa = 0, sum = 0;
-      for (int y = 0; y < 4; y++) {
-        for (int x = 0; x < 4; x++) {
-          const int d = s[y * cW + x] - p[y * 8 + x];
-          blk[y * 4 + x] = d;
-          sum += d;
-          sa += d < 0 ? -d : d;
-        }
-      }
+      v128_t r[4];
+      const int sa = res_rows(P + (b >> 1) * 4 * cW + (b & 1) * 4, cW, pred + (b >> 1) * 32 + (b & 1) * 4, 8, r);
       if (sa <= zeroC) {
-        dc[b] = sum;
+        dc[b] = hsum(wasm_i32x4_add(wasm_i32x4_add(r[0], r[1]), wasm_i32x4_add(r[2], r[3])));
         continue;
       }
-      forward4x4(blk, wc);
-      dc[b] = wc[0];
-      if (quant4x4(wc, qpc, zc, 1)) return 0;
+      fwd4x4_v(r);
+      dc[b] = wasm_i32x4_extract_lane(r[0], 0);
+      if (quant4x4_v(r, qpc, zc, 1)) return 0;
     }
     hadamard2x2(dc, dcF);
     if (quant_chroma_dc(dcF, qpc, zc)) return 0;
   }
   return 1;
-}
-
-static void dequant4x4(const i32 *c, int qp, int *d, int skipDC) {
-  const int *v = DEQUANT_V[qp % 6];
-  const int sh = qp / 6;
-  for (int i = skipDC ? 1 : 0; i < 16; i++) d[i] = (c[i] * v[POS_CLASS[i]]) << sh;
-}
-
-static void idct4x4_add(int *d, const u8 *pred, int ps, u8 *dst, int ds) {
-  for (int y = 0; y < 4; y++) {
-    const int o = y * 4, d0 = d[o], d1 = d[o + 1], d2 = d[o + 2], d3 = d[o + 3];
-    const int e0 = d0 + d2, e1 = d0 - d2, e2 = (d1 >> 1) - d3, e3 = d1 + (d3 >> 1);
-    d[o] = e0 + e3;
-    d[o + 1] = e1 + e2;
-    d[o + 2] = e1 - e2;
-    d[o + 3] = e0 - e3;
-  }
-  for (int x = 0; x < 4; x++) {
-    const int d0 = d[x], d1 = d[4 + x], d2 = d[8 + x], d3 = d[12 + x];
-    const int e0 = d0 + d2, e1 = d0 - d2, e2 = (d1 >> 1) - d3, e3 = d1 + (d3 >> 1);
-    const int r[4] = {(e0 + e3 + 32) >> 6, (e1 + e2 + 32) >> 6, (e1 - e2 + 32) >> 6, (e0 - e3 + 32) >> 6};
-    for (int k = 0; k < 4; k++) dst[k * ds + x] = (u8)clip255(pred[k * ps + x] + r[k]);
-  }
 }
 
 static void dequant_chroma_dc(const i32 *c, int qpc, int *out) {
@@ -602,7 +606,6 @@ static void dequant_chroma_dc(const i32 *c, int qpc, int *out) {
 // dU, dV: the MB in the chroma planes (stride cW).
 EXPORT(recon_inter)
 void recon_inter(const i32 *res, int qp, const u8 *pY, const u8 *pU, const u8 *pV, u8 *dY, int W, u8 *dU, u8 *dV, int cW) {
-  int dq[16];
   const int cbp = res[RES_CBP];
   for (int b = 0; b < 16; b++) {
     const int bx = b & 3, by = b >> 2;
@@ -610,8 +613,7 @@ void recon_inter(const i32 *res, int qp, const u8 *pY, const u8 *pU, const u8 *p
     u8 *d = dY + by * 4 * W + bx * 4;
     const int b8 = (by >> 1) * 2 + (bx >> 1);
     if (((cbp >> b8) & 1) && res[RES_NZL + b]) {
-      dequant4x4(res + RES_LUMA + b * 16, qp, dq, 0);
-      idct4x4_add(dq, p, 16, d, W);
+      recon4x4_v(res + RES_LUMA + b * 16, qp, 0, 0, 0, p, 16, d, W);
     } else {
       for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) d[y * W + x] = p[y * 16 + x];
     }
@@ -630,10 +632,7 @@ void recon_inter(const i32 *res, int qp, const u8 *pY, const u8 *pU, const u8 *p
     const i32 *ac = res + (comp ? RES_CR : RES_CB);
     for (int b = 0; b < 4; b++) {
       const int bx = b & 1, by = b >> 1;
-      if (cc == 2) dequant4x4(ac + b * 16, qpc, dq, 1);
-      else for (int i = 0; i < 16; i++) dq[i] = 0;
-      dq[0] = dcOut[b];
-      idct4x4_add(dq, pred + by * 32 + bx * 4, 8, P + by * 4 * cW + bx * 4, cW);
+      recon4x4_v(ac + b * 16, qpc, 1, dcOut[b], cc != 2, pred + by * 32 + bx * 4, 8, P + by * 4 * cW + bx * 4, cW);
     }
   }
 }
