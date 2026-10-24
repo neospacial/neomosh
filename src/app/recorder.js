@@ -3,7 +3,6 @@
 import { DEFAULT_SETTINGS } from '../codec/encoder.js';
 import { streamParams } from '../codec/headers.js';
 import { coverCrop } from './geometry.js';
-import { ClipAudio, storeSilence } from './audio.js';
 
 export const ST = {
   IDLE: 'idle',
@@ -30,8 +29,6 @@ export class Recorder {
     this.store = store;
     this.video = video;
     this.source = 'camera'; // 'camera' or 'file' (plan §11.5). The encoder cannot tell (R-31).
-    this.audio = null; // an AudioCapture when audio is on (D11), set by the app
-    this.stream = null; // the camera stream (its microphone track), set by the app
     this.on = on || {};
     this.state = ST.IDLE;
     this.settings = { ...DEFAULT_SETTINGS };
@@ -49,9 +46,6 @@ export class Recorder {
     this.pointList = []; // pause point meta in RAM: { n, frameIndex, tsUs, drops, thumb }
     this.sessionEndUs = 0; // end of the previous clips
     this.lastTsUs = 0;
-    this.audioSamples = 0; // stored audio samples (= the session length in samples, at a pause)
-    this.clipAudio = null;
-    this.audioActive = false;
     this.encInFlight = 0;
     this.decInFlight = 0;
     this.drops = 0;
@@ -110,7 +104,7 @@ export class Recorder {
     this.mirror = mirror;
     this.session = {
       id: Date.now(), created: Date.now(), w, h, codedW: p.codedW, codedH: p.codedH, fps, aspect, orient,
-      level: p.level, audio: !!this.audio, sampleRate: this.audio ? this.audio.sampleRate : 0,
+      level: p.level,
     };
     await this.store.putSession(this.session);
     this.reset();
@@ -145,27 +139,9 @@ export class Recorder {
     this.clipStartFrameTime = null;
     this.lastCapture = -1e9;
     this.chain = Promise.resolve();
-    await this.startAudio();
     this.setState(ST.RECORDING);
     this.lockScreen();
     this.loop();
-  }
-
-  // Plan §10.2: the audio of the clip. Without a capture (no microphone, or another sample rate
-  // after a restore), the clip gets silence at the pause.
-  async startAudio() {
-    this.clipAudio = null;
-    this.audioActive = false;
-    const s = this.session;
-    if (!s.audio) return;
-    this.clipAudio = new ClipAudio(this.store, s.id, s.sampleRate, this.audioSamples);
-    if (!this.audio || this.audio.sampleRate !== s.sampleRate) return;
-    try {
-      await this.audio.start(this.clipAudio, this.source, this.video, this.stream);
-      this.audioActive = true;
-    } catch (e) {
-      if (this.on.toast) this.on.toast('No audio for this clip: ' + (e && e.message));
-    }
   }
 
   // R-14: frame timing from requestVideoFrameCallback, else requestAnimationFrame.
@@ -180,15 +156,13 @@ export class Recorder {
       let t;
       if (this.source === 'file') t = (meta ? meta.mediaTime : v.currentTime) * 1000;
       else t = meta ? meta.captureTime ?? meta.expectedDisplayTime ?? now : performance.now();
-      // The performance time of the frame, for the start of the audio.
-      const perfT = this.source === 'file' ? (meta ? meta.expectedDisplayTime ?? now : performance.now()) : t;
-      this.capture(t, perfT);
+      this.capture(t);
     };
     if (useVfc) v.requestVideoFrameCallback(tick);
     else requestAnimationFrame(tick);
   }
 
-  capture(t, perfT = t) {
+  capture(t) {
     const p = this.params;
     if (t - this.lastCapture < 1000 / p.fps - 2) return;
     this.lastCapture = t;
@@ -201,11 +175,7 @@ export class Recorder {
     }
     const v = this.video;
     if (!v.videoWidth || !v.videoHeight) return;
-    if (this.clipStartFrameTime === null) {
-      this.clipStartFrameTime = t;
-      // R-30: the clip audio starts at the first video frame.
-      if (this.audioActive) this.clipAudio.setStart(this.audio.frameAt(perfT));
-    }
+    if (this.clipStartFrameTime === null) this.clipStartFrameTime = t;
     const tsUs = this.sessionEndUs + Math.round((t - this.clipStartFrameTime) * 1000);
     const c = coverCrop(v.videoWidth, v.videoHeight, p.w, p.h);
     this.encInFlight++;
@@ -301,8 +271,6 @@ export class Recorder {
   async pause(reason) {
     if (this.state !== ST.RECORDING) return;
     this.setState(ST.PAUSING); // step 1: the capture loop stops
-    const audioStopped = this.audioActive ? this.audio.stop() : Promise.resolve(); // and the audio
-    this.audioActive = false;
     this.unlockScreen();
     if (reason && this.on.toast) this.on.toast(reason);
     await this.chain;
@@ -316,28 +284,15 @@ export class Recorder {
       this.setState(ST.IDLE);
       return;
     }
-    await audioStopped;
     if (!this.clipFrames) {
-      // No frame in this clip: no new pause point and no audio. The overlay stays.
-      this.clipAudio = null;
+      // No frame in this clip: no new pause point. The overlay stays.
       this.clip--;
       this.setState(ST.PAUSED);
       if (this.on.paused) this.on.paused(null, null);
       return;
     }
     this.sessionEndUs = this.lastTsUs + Math.round(1e6 / this.params.fps);
-    await this.finishAudio(); // step 5
     await this.makePoint(this.clipDrops);
-  }
-
-  // Plan §8.4 step 5 (R-30): the clip audio gets exactly the length of the clip video.
-  async finishAudio() {
-    const s = this.session;
-    if (!s.audio) return;
-    const target = Math.round((this.sessionEndUs * s.sampleRate) / 1e6);
-    const clip = this.clipAudio || new ClipAudio(this.store, s.id, s.sampleRate, this.audioSamples);
-    this.audioSamples = await clip.finish(target - this.audioSamples);
-    this.clipAudio = null;
   }
 
   // Plan §8.4 steps 4, 6, and 7: a pause point at the current end of the session.
@@ -354,7 +309,7 @@ export class Recorder {
   }
 
   async putPoint(p) {
-    const point = { sessionId: this.session.id, audioSamples: this.audioSamples, settings: { ...this.settings }, ...p };
+    const point = { sessionId: this.session.id, settings: { ...this.settings }, ...p };
     await this.store.putPoint(point);
     this.points = p.n;
     this.pointList[p.n] = { n: p.n, frameIndex: p.frameIndex, tsUs: p.tsUs, drops: p.drops, thumb: p.thumb, settings: point.settings };
@@ -387,7 +342,7 @@ export class Recorder {
     try {
       await this.revertTo(n);
     } catch (e) {
-      this.setState(ST.PAUSED);
+      this.setState(ST.PAUSED); // a failed revert must not stay busy
       throw e;
     }
   }
@@ -395,7 +350,7 @@ export class Recorder {
   async revertTo(n) {
     const p = await this.store.getPoint(this.session.id, n);
     if (!p || !p.refY) throw new Error(`No pause point ${n}`);
-    await this.store.truncate(this.session.id, p.frameIndex, n, p.audioSamples || 0); // steps 1 to 3
+    await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 and 2 (no audio: D20)
     this.dec.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV }); // step 4
     this.settings = { ...p.settings }; // step 6
     this.enc.postMessage({ cmd: 'settings', settings: this.settings });
@@ -414,7 +369,6 @@ export class Recorder {
     this.clip = p.n;
     this.sessionEndUs = p.tsUs;
     this.lastTsUs = p.tsUs;
-    this.audioSamples = p.audioSamples || 0;
     // Each clip after the first starts with a hidden I-frame at its pause point.
     this.cuts = this.pointList.filter((q) => q && q.n >= 1 && q.frameIndex < this.frameCount).map((q) => q.frameIndex);
     this.drops = this.pointList.reduce((a, q) => a + (q ? q.drops : 0), 0);
@@ -466,18 +420,8 @@ export class Recorder {
       this.frameCount = total;
       this.clip = last.n + 1;
       this.sessionEndUs = this.lastTsUs = lastTs + Math.round(1e6 / session.fps);
-      if (session.audio) {
-        // The stored audio of the last clip: trim or pad it to the video (R-30).
-        const target = Math.round((this.sessionEndUs * session.sampleRate) / 1e6);
-        const have = await this.store.audioLength(id);
-        if (have > target) await this.store.truncateAudio(id, target);
-        else if (have < target) await storeSilence(this.store, id, session.sampleRate, have, target - have);
-        this.audioSamples = target;
-      }
       await this.makePoint(0);
     } else {
-      // Audio after the last point has no video: delete it.
-      if (session.audio) await this.store.truncateAudio(id, this.audioSamples);
       const snap = await this.snapshot();
       if (this.on.paused) this.on.paused(snap.bitmap, last.thumb);
       this.setState(ST.PAUSED);

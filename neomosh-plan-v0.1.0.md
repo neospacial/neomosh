@@ -45,7 +45,7 @@ Main flow:
 | D8 | Front camera: mirrored by default, as displayed. A setting can change this. |
 | D9 | Settings panel with all encoder settings. Each setting has only values that still make a datamosh. |
 | D10 | Frame-drop warning: a small, non-obtrusive badge. |
-| D11 | Audio: at startup, check for an AAC `AudioEncoder`. If it is available, record audio for each clip (option B). If not, there is no audio, and a small badge tells the user. |
+| D11 | (Replaced by D20: no audio.) Audio: at startup, check for an AAC `AudioEncoder`. If it is available, record audio for each clip (option B). If not, there is no audio, and a small badge tells the user. |
 | D12 | Export: use the most efficient bake method that does not change the look and does not make a corrupt file. Selected method: **lossless remux** (see §9). It must be verified by tests (§13). |
 | D13 | Export button: **top right**. Camera switch: **bottom right**. |
 | D14 | Undo with full history. The user can go back to **any** pause point, not only one step. |
@@ -54,6 +54,7 @@ Main flow:
 | D17 | 720 size: all frame rates stay available. When the selected rate is more than the device can hold, the settings panel shows a hint (§7.1). The app does not change the rate (R-20). |
 | D18 | No `navigator.storage.persist()` request: some browsers show a permission prompt for it. The app uses best-effort storage, writes often, and warns when free storage is low (R-26). |
 | D19 | Encoder queue: a maximum of 6 frames in flight (R-18), not 2. The buffer (about 200 ms at 30 fps) absorbs short CPU load peaks from other apps without drops. It does not change the look or the file. The live mosh view can be late by up to this time during a peak. |
+| D20 | **No audio.** Audio is removed from the app (it replaces D11): no microphone, no file sound, no AAC, no audio badge, video-only MP4. §10, R-30, the audio rows of §4, §11.3, and §12, and Phase 6 do not apply. Reason: the app must use all of the device for the encoder. |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -448,7 +449,9 @@ Layout: `ftyp` (major `isom`, compatible `isom iso2 avc1 mp41`), `moov` before `
 
 ---
 
-## 10. Audio (D11)
+## 10. Audio (D11) — removed by D20
+
+This section does not apply. It stays here only as a record.
 
 ### 10.1 Startup check
 
@@ -473,7 +476,7 @@ Encode the PCM with `AudioEncoder` at export. Mux the AAC chunks. Storing PCM (n
 
 ### 10.4 Sync
 
-- **R-30** Video timestamps define the timeline. At each pause, trim or pad (silence) the clip audio to the exact video clip length.
+- **R-30** (Not used: D20.) Video timestamps define the timeline. At each pause, trim or pad (silence) the clip audio to the exact video clip length.
 - AAC priming delay (about 1024 samples): add an `elst` edit list in the audio track if the encoder reports it. This is polish (Phase 7).
 
 ---
@@ -524,7 +527,7 @@ Small, quiet icons. No dialogs. Tap a badge to show a toast with the detail.
 |---|---|---|
 | Amber ⚠ + count | Session drop count > 0 | "The encoder dropped N frames. Use a smaller size, a smaller search range, or a lower frame rate." |
 | Amber ⚠ pulses once | A new drop happens | — |
-| Grey mic with slash | Audio Off | "No audio. This browser has no AAC encoder." or "No audio. The microphone is off." |
+| (Removed by D20) Grey mic with slash | Audio Off | "No audio. This browser has no AAC encoder." or "No audio. The microphone is off." |
 
 The settings Info section (§7.4) shows the same data in full.
 
@@ -676,7 +679,7 @@ Done when: all §13.1 and §13.2 tests pass, and Ryan has run the benchmark on h
 - Source bar, file picker, file scrubber, file end handling.
 - Done when: a session can mix camera and file clips in any order, and the export is valid.
 
-### Phase 6 — Audio
+### Phase 6 — Audio (removed by D20)
 
 - AAC check, audio badge, worklet capture (mic and file), PCM storage, trim/pad, AAC encode at export, audio track in the muxer.
 - Done when: the export has audio in sync at each cut on iPhone and Android, and the no-AAC path shows the badge and exports video only.

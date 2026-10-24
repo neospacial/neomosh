@@ -47,9 +47,7 @@ body[data-state="paused"] #recDot,body[data-state="pausing"] #recDot,body[data-s
 .badge{display:none;align-items:center;gap:3px;height:24px;padding:0 6px;border-radius:12px;background:rgba(255,255,255,.08);font-size:12px;font-variant-numeric:tabular-nums}
 .badge svg{width:15px;height:15px;fill:currentColor}
 #dropBadge{color:var(--ios-amber)}
-#micBadge{color:#8e8e93}
 body[data-drops="1"] #dropBadge{display:flex}
-body[data-noaudio="1"] #micBadge{display:flex}
 body[data-pulse="1"] #dropBadge{animation:pulse .6s ease-out}
 @keyframes pulse{0%{transform:scale(1.35);background:rgba(255,159,10,.45)}100%{transform:scale(1)}}
 

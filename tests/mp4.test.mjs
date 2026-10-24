@@ -84,7 +84,7 @@ export const tests = [
       for (const [name, opts] of [
         ['mp4_co64', { forceCo64: true }],
         ['mp4_largemdat', { forceLargeMdat: true, forceCo64: true }],
-        ['mp4_chunks', { chunkDuration: 7000 / 90000 }],
+        ['mp4_chunks', { chunkDuration: 7000 }],
       ]) {
         const { mp4File } = verify(name, sim, 'clean', opts);
         const buf = fs.readFileSync(mp4File);

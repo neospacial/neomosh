@@ -60,9 +60,7 @@ body[data-state="paused"] #recDot,body[data-state="pausing"] #recDot,body[data-s
 .badge{display:none;align-items:center;gap:3px;height:24px;padding:0 6px;border-radius:12px;background:rgba(255,255,255,.08);font-size:12px;font-variant-numeric:tabular-nums}
 .badge svg{width:15px;height:15px;fill:currentColor}
 #dropBadge{color:var(--ios-amber)}
-#micBadge{color:#8e8e93}
 body[data-drops="1"] #dropBadge{display:flex}
-body[data-noaudio="1"] #micBadge{display:flex}
 body[data-pulse="1"] #dropBadge{animation:pulse .6s ease-out}
 @keyframes pulse{0%{transform:scale(1.35);background:rgba(255,159,10,.45)}100%{transform:scale(1)}}
 
@@ -273,9 +271,6 @@ body[data-confirm="1"] #confirm{display:flex}
       <div id="recPill"><span id="recDot"></span><span id="timer">00:00</span><span id="clipLbl"></span></div>
       <button id="dropBadge" class="badge" type="button" aria-label="Dropped frames">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 1.5 21h21L12 3zm1 15h-2v-2h2v2zm0-4h-2V9h2v5z"/></svg><span id="dropN">0</span>
-      </button>
-      <button id="micBadge" class="badge" type="button" aria-label="No audio">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-4.08A7 7 0 0 0 19 11z"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
       </button>
     </div>
     <button id="exportBtn" class="topBtn" type="button">Export</button>
@@ -2780,7 +2775,7 @@ return { DEFAULT_SETTINGS, SETTING_VALUES, checkSettings, Encoder };
 
 // ---- mux/mp4.js
 const { avcC, muxMp4 } = (() => {
-// MP4 muxer (plan §9.4). Video only in this version; the audio track comes in Phase 6.
+// MP4 muxer (plan §9.4). Video only (no audio: D20).
 // Layout: ftyp, moov, mdat. The moov comes first, so all sample sizes must be known first.
 // R-27: the file is returned as a list of parts (for a Blob). There is no one large buffer.
 // R-28: co64 when a chunk offset is 4 GB or more, else stco.
@@ -2911,99 +2906,77 @@ function chunkOffsets(offsets, use64) {
   return fullBox(use64 ? 'co64' : 'stco', 0, 0, b);
 }
 
-function mp4a(a) {
-  const b = new Bytes().zeros(6).u16(1).zeros(8).u16(a.channels).u16(16).u16(0).u16(0).u32(a.sampleRate * 65536);
-  return box('mp4a', b, esds(a));
-}
-
-// esds (ISO/IEC 14496-1 ES_Descriptor) with the AudioSpecificConfig of the AAC stream.
-function esds(a) {
-  const desc = (tag, body) => new Bytes().u8(tag).u8(body.length).bytes(body.a || body);
-  const dsi = desc(0x05, a.asc);
-  const dcd = desc(0x04, new Bytes().u8(0x40).u8(0x15).u24(0).u32(a.bitrate || 0).u32(a.bitrate || 0).bytes(dsi.a));
-  const sl = desc(0x06, [0x02]);
-  const es = desc(0x03, new Bytes().u16(2).u8(0).bytes(dcd.a).bytes(sl.a));
-  return fullBox('esds', 0, 0, es);
-}
-
-// Split the samples of a track into chunks of about chunkDur (timescale units).
-function makeChunks(track, chunkDur) {
-  const chunks = [];
-  let cur = null, t = 0;
-  track.samples.forEach((s, i) => {
-    if (!cur) cur = { track, first: i, n: 0, bytes: 0, start: t / track.timescale, offset: 0 };
-    cur.n++;
-    cur.bytes += s.size;
-    t += s.duration;
-    if (t - cur.start * track.timescale >= chunkDur) {
-      chunks.push(cur);
-      cur = null;
-    }
-  });
-  if (cur) chunks.push(cur);
-  return chunks;
-}
-
 // Make the MP4 file.
 // video = { width, height, timescale, sps, pps, samples: [{ data: Uint8Array | Blob, size, duration, key }] }
-// audio (optional) = { sampleRate, channels, asc, bitrate, samples: [{ data, size, duration }] }, timescale = sampleRate
-// opts.chunkDuration: chunk length in seconds (default 1). The chunks of the tracks are interleaved by time.
+// opts.chunkDuration: chunk length in timescale units (default 1 s).
 // opts.forceCo64, opts.forceLargeMdat: for tests only.
 // Returns { parts, size }. parts: Uint8Array headers and the sample data, in file order.
-function muxMp4(video, opts = {}, audio = null) {
-  if (!video.samples.length) throw new Error('No samples');
-  const keys = [];
-  video.samples.forEach((s, i) => s.key && keys.push(i + 1));
-  if (keys[0] !== 1) throw new Error('The first sample must be a sync sample');
-  const tracks = [{ ...video, kind: 'vide', id: 1 }];
-  if (audio && audio.samples.length) tracks.push({ ...audio, timescale: audio.sampleRate, kind: 'soun', id: 2 });
-  const chunkSec = opts.chunkDuration ?? 1;
-  for (const t of tracks) {
-    t.duration = t.samples.reduce((a, s) => a + s.duration, 0);
-    t.chunks = makeChunks(t, chunkSec * t.timescale);
+function muxMp4(video, opts = {}) {
+  const samples = video.samples;
+  if (!samples.length) throw new Error('No samples');
+  const ts = video.timescale;
+  const chunkDur = opts.chunkDuration ?? ts;
+
+  // Chunks: consecutive samples, about chunkDur long.
+  const chunkSizes = [];
+  const chunkBytes = [];
+  let n = 0, dur = 0, bytes = 0;
+  for (const s of samples) {
+    n++;
+    dur += s.duration;
+    bytes += s.size;
+    if (dur >= chunkDur) {
+      chunkSizes.push(n);
+      chunkBytes.push(bytes);
+      n = dur = bytes = 0;
+    }
   }
-  // File order of the chunks: by start time, video first at equal times.
-  const order = tracks.flatMap((t) => t.chunks).sort((a, b) => a.start - b.start || a.track.id - b.track.id);
+  if (n) {
+    chunkSizes.push(n);
+    chunkBytes.push(bytes);
+  }
   let mdatPayload = 0;
-  for (const c of order) mdatPayload += c.bytes;
+  for (const b of chunkBytes) mdatPayload += b;
   const largeMdat = opts.forceLargeMdat || mdatPayload + 8 > 0xffffffff;
   const mdatHeader = largeMdat
     ? new Uint8Array([0, 0, 0, 1, 0x6d, 0x64, 0x61, 0x74, ...new Bytes().u64(mdatPayload + 16).a])
     : new Uint8Array([...new Bytes().u32(mdatPayload + 8).a, 0x6d, 0x64, 0x61, 0x74]);
-  const movieDur = Math.max(...tracks.map((t) => Math.round((t.duration * MOVIE_TIMESCALE) / t.timescale)));
+
+  const durations = samples.map((s) => s.duration);
+  const totalDur = durations.reduce((a, b) => a + b, 0);
+  const movieDur = Math.round((totalDur * MOVIE_TIMESCALE) / ts);
+  const keys = [];
+  samples.forEach((s, i) => s.key && keys.push(i + 1));
+  if (keys[0] !== 1) throw new Error('The first sample must be a sync sample');
 
   const head = ftyp();
-  const trak = (t, use64) => {
-    const isV = t.kind === 'vide';
-    const tables = [
-      fullBox('stsd', 0, 0, new Bytes().u32(1), isV ? avc1(t) : mp4a(t)),
-      stts(t.samples.map((s) => s.duration)),
-      ...(isV ? [stss(keys)] : []),
-      stsc(t.chunks.map((c) => c.n)),
-      stsz(t.samples.map((s) => s.size)),
-      chunkOffsets(t.chunks.map((c) => c.offset), use64),
-    ];
-    const media = isV ? fullBox('vmhd', 0, 1, new Bytes().zeros(8)) : fullBox('smhd', 0, 0, new Bytes().u16(0).u16(0));
-    const minf = box('minf', media, dinf(), box('stbl', ...tables));
-    const mdia = box('mdia', mdhd(t.timescale, t.duration), hdlr(t.kind, isV ? 'neomosh video' : 'neomosh audio'), minf);
-    const tdur = Math.round((t.duration * MOVIE_TIMESCALE) / t.timescale);
-    return box('trak', tkhd(t.id, tdur, isV ? t.width : 0, isV ? t.height : 0, !isV), mdia);
-  };
   const build = (use64) => {
     // The chunk offsets depend on the moov size. The moov size depends only on use64.
-    const make = () => box('moov', mvhd(movieDur, tracks.length + 1), ...tracks.map((t) => trak(t, use64)));
-    let o = head.length + make().length + mdatHeader.length;
-    for (const c of order) {
-      c.offset = o;
-      o += c.bytes;
+    const offsets = chunkBytes.map(() => 0);
+    const make = () => {
+      const stbl = box('stbl',
+        fullBox('stsd', 0, 0, new Bytes().u32(1), avc1(video)),
+        stts(durations), stss(keys), stsc(chunkSizes), stsz(samples.map((s) => s.size)),
+        chunkOffsets(offsets, use64));
+      const minf = box('minf', fullBox('vmhd', 0, 1, new Bytes().zeros(8)), dinf(), stbl);
+      const mdia = box('mdia', mdhd(ts, totalDur), hdlr('vide', 'neomosh video'), minf);
+      const trak = box('trak', tkhd(1, movieDur, video.width, video.height, false), mdia);
+      return box('moov', mvhd(movieDur, 2), trak);
+    };
+    let moov = make();
+    let o = head.length + moov.length + mdatHeader.length;
+    for (let i = 0; i < chunkBytes.length; i++) {
+      offsets[i] = o;
+      o += chunkBytes[i];
     }
-    return { moov: make(), lastOffset: order[order.length - 1].offset };
+    moov = make();
+    return { moov, lastOffset: offsets[offsets.length - 1] };
   };
   let r = build(!!opts.forceCo64);
   if (!opts.forceCo64 && r.lastOffset > 0xffffffff) r = build(true);
 
   const parts = [head, r.moov, mdatHeader];
-  for (const c of order) for (let i = c.first; i < c.first + c.n; i++) parts.push(c.track.samples[i].data);
+  for (const s of samples) parts.push(s.data);
   return { parts, size: head.length + r.moov.length + mdatHeader.length + mdatPayload };
 }
 
@@ -3055,21 +3028,20 @@ class Remuxer {
     return true;
   }
 
-  // Returns { parts, size, samples } (see muxMp4). audio: an AAC track for muxMp4, or null.
-  // muxOpts: for tests only.
-  finish(muxOpts, audio = null) {
+  // Returns { parts, size, samples } (see muxMp4). muxOpts: for tests only.
+  finish(muxOpts) {
     if (!this.last) throw new Error('No frames to export');
     this.last.duration = Math.round(VIDEO_TIMESCALE / this.params.fps);
     const p = this.params;
     const r = muxMp4({
       width: p.w, height: p.h, timescale: VIDEO_TIMESCALE, sps: spsNal(p), pps: ppsNal(), samples: this.samples,
-    }, muxOpts, audio);
+    }, muxOpts);
     return { ...r, samples: this.samples };
   }
 }
 
 // Export from an (async) iterable of frames, for example a cursor over IndexedDB (R-34).
-// opts: { cuts, signal (AbortSignal), onProgress(framesRead), audio (AAC track or null) }.
+// opts: { cuts, signal (AbortSignal), onProgress(framesRead) }.
 async function remuxOriginal(params, frames, opts = {}) {
   const rx = new Remuxer(params, opts);
   let n = 0;
@@ -3079,7 +3051,7 @@ async function remuxOriginal(params, frames, opts = {}) {
     n++;
     if (opts.onProgress) opts.onProgress(n);
   }
-  return rx.finish(undefined, opts.audio || null);
+  return rx.finish();
 }
 
 return { VIDEO_TIMESCALE, Remuxer, remuxOriginal };
@@ -3165,7 +3137,6 @@ function openDb() {
       if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('frames')) db.createObjectStore('frames', { keyPath: ['sessionId', 'index'] });
       if (!db.objectStoreNames.contains('points')) db.createObjectStore('points', { keyPath: ['sessionId', 'n'] });
-      if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio', { keyPath: ['sessionId', 'chunk'] });
     };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
@@ -3201,9 +3172,9 @@ class Store {
   }
 
   async deleteSession(id) {
-    const tx = this.db.transaction(['sessions', 'frames', 'points', 'audio'], 'readwrite');
+    const tx = this.db.transaction(['sessions', 'frames', 'points'], 'readwrite');
     tx.objectStore('sessions').delete(id);
-    for (const s of ['frames', 'points', 'audio']) tx.objectStore(s).delete(range(id));
+    for (const s of ['frames', 'points']) tx.objectStore(s).delete(range(id));
     return done(tx);
   }
 
@@ -3233,57 +3204,14 @@ class Store {
     return req(tx.objectStore('frames').count(range(id)));
   }
 
-  // Plan §12.3 steps 1 to 3: delete the frames from frameIndex, the points after n, and the audio
-  // from audioSamples.
-  async truncate(id, frameIndex, n, audioSamples = 0) {
-    await this.truncateAudio(id, audioSamples);
+  // Plan §12.3: delete the frames from frameIndex and the points after n (no audio: D20).
+  async truncate(id, frameIndex, n) {
     this.pending = this.pending.filter((f) => f.index < frameIndex);
     await this.flush();
     const tx = this.db.transaction(['frames', 'points'], 'readwrite');
     tx.objectStore('frames').delete(range(id, frameIndex));
     tx.objectStore('points').delete(range(id, n + 1));
     return done(tx);
-  }
-
-  // Audio (plan §10.2): chunks of interleaved stereo Int16 PCM. Key [sessionId, chunk], with
-  // chunk = startSample (the samples are counted for each channel).
-  async putAudio(id, startSample, pcm) {
-    const tx = this.db.transaction('audio', 'readwrite');
-    tx.objectStore('audio').put({ sessionId: id, chunk: startSample, startSample, pcm });
-    return done(tx);
-  }
-
-  // Delete the audio from sample n. The chunk that crosses n is cut.
-  async truncateAudio(id, n) {
-    const tx = this.db.transaction('audio', 'readwrite');
-    const os = tx.objectStore('audio');
-    os.delete(range(id, n));
-    if (n <= 0) return done(tx);
-    const prev = await req(os.openCursor(IDBKeyRange.bound([id, 0], [id, n], false, true), 'prev'));
-    if (prev && prev.value.startSample + prev.value.pcm.length / 2 > n) {
-      const c = prev.value;
-      os.put({ ...c, pcm: c.pcm.slice(0, (n - c.startSample) * 2) });
-    }
-    return done(tx);
-  }
-
-  // The count of stored samples (the end of the last chunk).
-  async audioLength(id) {
-    const tx = this.db.transaction('audio');
-    const c = await req(tx.objectStore('audio').openCursor(range(id), 'prev'));
-    return c ? c.value.startSample + c.value.pcm.length / 2 : 0;
-  }
-
-  async *readAudio(id) {
-    let from = 0;
-    for (;;) {
-      const tx = this.db.transaction('audio');
-      const list = await req(tx.objectStore('audio').getAll(range(id, from), 16));
-      if (!list.length) return;
-      for (const c of list) yield c;
-      const last = list[list.length - 1];
-      from = last.startSample + 1;
-    }
   }
 
   async getPoint(id, n) {
@@ -3328,284 +3256,9 @@ class Store {
 return { DB_NAME, DB_VERSION, openDb, Store };
 })();
 
-// ---- app/audio.js
-const { AAC_CONFIG, checkAudio, AudioCapture, ClipAudio, storeSilence, encodeAudio, makeAsc } = (() => {
-// Audio (plan §10, D11): AAC check, capture with an AudioWorklet, PCM storage for each clip with
-// the exact video clip length (R-30), and AAC encoding at export.
-
-const AAC_CONFIG = { codec: 'mp4a.40.2', numberOfChannels: 2, bitrate: 160000 };
-const CHUNK_SECONDS = 1;
-
-// The worklet collects blocks of about 2048 frames and posts them with the context frame of the
-// first sample. It runs only while it is on (RECORDING).
-const WORKLET_SRC = `
-class NeomoshCapture extends AudioWorkletProcessor {
-  constructor() {
-    super();
-    this.on = false;
-    this.n = 0;
-    this.l = new Float32Array(2048);
-    this.r = new Float32Array(2048);
-    this.frame = 0;
-    this.port.onmessage = (e) => {
-      if (e.data === 'start') { this.on = true; this.n = 0; }
-      if (e.data === 'stop') { this.flush(); this.on = false; this.port.postMessage({ done: true }); }
-    };
-  }
-  flush() {
-    if (!this.n) return;
-    const l = this.l.slice(0, this.n), r = this.r.slice(0, this.n);
-    this.port.postMessage({ frame: this.frame, l, r }, [l.buffer, r.buffer]);
-    this.n = 0;
-  }
-  process(inputs) {
-    if (!this.on) return true;
-    const inp = inputs[0];
-    const len = inp && inp.length ? inp[0].length : 128;
-    // A full batch, or a gap in the frames (a skipped render quantum): post the batch first.
-    if (this.n + len > this.l.length || (this.n && currentFrame !== this.frame + this.n)) this.flush();
-    if (this.n === 0) this.frame = currentFrame;
-    if (inp && inp.length) {
-      this.l.set(inp[0], this.n);
-      this.r.set(inp[1] || inp[0], this.n);
-    } else {
-      this.l.fill(0, this.n, this.n + len);
-      this.r.fill(0, this.n, this.n + len);
-    }
-    this.n += len;
-    return true;
-  }
-}
-registerProcessor('neomosh-capture', NeomoshCapture);
-`;
-
-// At the gate (a user gesture): make the AudioContext and check for an AAC AudioEncoder.
-// Returns { ctx, sampleRate } or { reason } when audio is off.
-async function checkAudio() {
-  const AC = window.AudioContext || window.webkitAudioContext;
-  if (!AC || typeof AudioEncoder === 'undefined') return { reason: 'aac' };
-  let ctx;
-  try {
-    ctx = new AC();
-    const s = await AudioEncoder.isConfigSupported({ ...AAC_CONFIG, sampleRate: ctx.sampleRate });
-    if (!s.supported) throw new Error('AAC');
-    const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: 'text/javascript' }));
-    await ctx.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
-    await ctx.suspend(); // nothing runs until a recording starts
-    return { ctx, sampleRate: ctx.sampleRate };
-  } catch {
-    if (ctx) ctx.close().catch(() => {});
-    return { reason: 'aac' };
-  }
-}
-
-// Capture for one AudioContext. The source node changes with the clip (microphone or file).
-class AudioCapture {
-  constructor(ctx) {
-    this.ctx = ctx;
-    this.sampleRate = ctx.sampleRate;
-    this.node = new AudioWorkletNode(ctx, 'neomosh-capture', { numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2] });
-    // The worklet output is silence. The connection to the destination makes the graph run.
-    this.node.connect(ctx.destination);
-    this.node.port.onmessage = (e) => this.onMessage(e.data);
-    this.source = null;
-    this.clip = null;
-    this.fileSources = new WeakMap();
-  }
-
-  // The source node: a media element (file, never to the speakers: plan §10.2) or a stream (mic).
-  sourceFor(kind, el, stream) {
-    if (kind === 'file') {
-      let s = this.fileSources.get(el);
-      if (!s) {
-        s = this.ctx.createMediaElementSource(el); // only one for each element
-        this.fileSources.set(el, s);
-      }
-      el.muted = false; // the element sound goes to the graph, not to the speakers
-      return s;
-    }
-    const track = stream && stream.getAudioTracks()[0];
-    return track && track.readyState === 'live' ? this.ctx.createMediaStreamSource(new MediaStream([track])) : null;
-  }
-
-  // Start the capture for a clip. clip: a ClipAudio.
-  async start(clip, kind, el, stream) {
-    this.clip = clip;
-    await this.ctx.resume();
-    this.source = this.sourceFor(kind, el, stream);
-    if (this.source) this.source.connect(this.node);
-    // Context time = performance time (s) + offset, for the start of the video (R-30).
-    this.offset = this.ctx.currentTime - performance.now() / 1000;
-    this.node.port.postMessage('start');
-  }
-
-  // The context frame at a performance time (ms).
-  frameAt(perfMs) {
-    return Math.round((perfMs / 1000 + this.offset) * this.sampleRate);
-  }
-
-  // Stop the capture. Resolves when the last block arrived. The context is then suspended.
-  stop() {
-    return new Promise((resolve) => {
-      this.stopWaiter = resolve;
-      this.node.port.postMessage('stop');
-    }).then(async () => {
-      if (this.source) this.source.disconnect();
-      this.source = null;
-      await this.ctx.suspend();
-    });
-  }
-
-  onMessage(m) {
-    if (m.done) {
-      if (this.stopWaiter) this.stopWaiter();
-      this.stopWaiter = null;
-      return;
-    }
-    if (this.clip) this.clip.addBlock(m.frame, m.l, m.r);
-  }
-}
-
-const toS16 = (v) => {
-  const x = Math.round(v * 32767);
-  return x > 32767 ? 32767 : x < -32768 ? -32768 : x;
-};
-
-// The audio of one clip. Sample i of the clip = context frame startFrame + i. The clip starts at
-// session sample base (the end of the previous clips). PCM goes to the store in chunks of about 1 s.
-class ClipAudio {
-  constructor(store, sessionId, sampleRate, base) {
-    this.store = store;
-    this.id = sessionId;
-    this.sr = sampleRate;
-    this.base = base;
-    this.startFrame = null;
-    this.pending = []; // blocks before the start is known
-    this.written = 0; // samples stored
-    this.buf = new Int16Array(sampleRate * CHUNK_SECONDS * 2);
-    this.bufLen = 0; // samples in buf
-    this.writes = Promise.resolve();
-  }
-
-  // The context frame of the first video frame of the clip.
-  setStart(frame) {
-    if (this.startFrame !== null) return;
-    this.startFrame = frame;
-    const p = this.pending;
-    this.pending = [];
-    for (const b of p) this.addBlock(b.frame, b.l, b.r);
-  }
-
-  addBlock(frame, l, r) {
-    if (this.startFrame === null) {
-      this.pending.push({ frame, l, r });
-      return;
-    }
-    const expected = this.startFrame + this.written + this.bufLen;
-    let from = 0;
-    if (frame > expected) this.pushSilence(frame - expected); // a gap: silence keeps the sync
-    else from = expected - frame; // the samples before the start (or a repeat)
-    for (let i = from; i < l.length; i++) this.push(toS16(l[i]), toS16(r[i]));
-  }
-
-  push(a, b) {
-    const k = this.bufLen * 2;
-    this.buf[k] = a;
-    this.buf[k + 1] = b;
-    if (++this.bufLen * 2 === this.buf.length) this.flush();
-  }
-
-  pushSilence(n) {
-    for (let i = 0; i < n; i++) this.push(0, 0);
-  }
-
-  flush() {
-    if (!this.bufLen) return;
-    const pcm = this.buf.slice(0, this.bufLen * 2);
-    const start = this.base + this.written;
-    this.written += this.bufLen;
-    this.bufLen = 0;
-    this.writes = this.writes.then(() => this.store.putAudio(this.id, start, pcm));
-  }
-
-  // R-30: trim or pad the clip audio to exactly len samples, and store all of it.
-  async finish(len) {
-    if (this.startFrame === null) this.setStart(this.pending.length ? this.pending[0].frame : 0);
-    const have = this.written + this.bufLen;
-    if (have < len) this.pushSilence(len - have);
-    else if (len >= this.written) this.bufLen = len - this.written;
-    else this.bufLen = 0;
-    this.flush();
-    await this.writes;
-    if (this.written > len) await this.store.truncateAudio(this.id, this.base + len);
-    return this.base + len;
-  }
-}
-
-// Silence for a clip without a sound source (for example the microphone is off).
-async function storeSilence(store, id, sampleRate, base, len) {
-  const clip = new ClipAudio(store, id, sampleRate, base);
-  clip.setStart(0);
-  return clip.finish(len);
-}
-
-// Export (plan §10.3): encode the stored PCM to AAC. Returns a track for muxMp4, or null.
-async function encodeAudio(store, id, sampleRate, totalSamples, { signal, onProgress } = {}) {
-  const out = [];
-  let asc = null;
-  let error = null;
-  const enc = new AudioEncoder({
-    output: (chunk, meta) => {
-      if (meta && meta.decoderConfig && meta.decoderConfig.description) asc = new Uint8Array(meta.decoderConfig.description);
-      const d = new Uint8Array(chunk.byteLength);
-      chunk.copyTo(d);
-      out.push(d);
-    },
-    error: (e) => (error = e),
-  });
-  enc.configure({ ...AAC_CONFIG, sampleRate });
-  let done = 0;
-  for await (const c of store.readAudio(id)) {
-    if (signal && signal.aborted) throw new Error('Export cancelled');
-    if (error) throw error;
-    if (c.startSample >= totalSamples) break;
-    const n = Math.min(c.pcm.length / 2, totalSamples - c.startSample);
-    const data = new AudioData({
-      format: 's16', sampleRate, numberOfFrames: n, numberOfChannels: 2,
-      timestamp: Math.round((c.startSample * 1e6) / sampleRate), data: c.pcm.subarray(0, n * 2),
-    });
-    enc.encode(data);
-    data.close();
-    done = c.startSample + n;
-    if (onProgress) onProgress(done / totalSamples);
-    while (enc.encodeQueueSize > 4) await new Promise((r) => setTimeout(r, 5));
-  }
-  await enc.flush();
-  enc.close();
-  if (error) throw error;
-  if (!out.length) return null;
-  return {
-    sampleRate, channels: 2, bitrate: AAC_CONFIG.bitrate, asc: asc || makeAsc(sampleRate, 2),
-    samples: out.map((d) => ({ data: d, size: d.length, duration: 1024 })),
-  };
-}
-
-const RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
-
-// AudioSpecificConfig for AAC-LC.
-function makeAsc(sampleRate, channels) {
-  const fi = RATES.indexOf(sampleRate);
-  return new Uint8Array([(2 << 3) | (fi >> 1), ((fi & 1) << 7) | (channels << 3)]);
-}
-
-return { AAC_CONFIG, checkAudio, AudioCapture, ClipAudio, storeSilence, encodeAudio, makeAsc };
-})();
-
 // ---- app/recorder.js
 const { ST, Recorder } = (() => {
 // Recorder (plan §8): session, capture, encoder and decoder workers, pause and resume.
-
 
 
 
@@ -3636,8 +3289,6 @@ class Recorder {
     this.store = store;
     this.video = video;
     this.source = 'camera'; // 'camera' or 'file' (plan §11.5). The encoder cannot tell (R-31).
-    this.audio = null; // an AudioCapture when audio is on (D11), set by the app
-    this.stream = null; // the camera stream (its microphone track), set by the app
     this.on = on || {};
     this.state = ST.IDLE;
     this.settings = { ...DEFAULT_SETTINGS };
@@ -3655,9 +3306,6 @@ class Recorder {
     this.pointList = []; // pause point meta in RAM: { n, frameIndex, tsUs, drops, thumb }
     this.sessionEndUs = 0; // end of the previous clips
     this.lastTsUs = 0;
-    this.audioSamples = 0; // stored audio samples (= the session length in samples, at a pause)
-    this.clipAudio = null;
-    this.audioActive = false;
     this.encInFlight = 0;
     this.decInFlight = 0;
     this.drops = 0;
@@ -3716,7 +3364,7 @@ class Recorder {
     this.mirror = mirror;
     this.session = {
       id: Date.now(), created: Date.now(), w, h, codedW: p.codedW, codedH: p.codedH, fps, aspect, orient,
-      level: p.level, audio: !!this.audio, sampleRate: this.audio ? this.audio.sampleRate : 0,
+      level: p.level,
     };
     await this.store.putSession(this.session);
     this.reset();
@@ -3751,27 +3399,9 @@ class Recorder {
     this.clipStartFrameTime = null;
     this.lastCapture = -1e9;
     this.chain = Promise.resolve();
-    await this.startAudio();
     this.setState(ST.RECORDING);
     this.lockScreen();
     this.loop();
-  }
-
-  // Plan §10.2: the audio of the clip. Without a capture (no microphone, or another sample rate
-  // after a restore), the clip gets silence at the pause.
-  async startAudio() {
-    this.clipAudio = null;
-    this.audioActive = false;
-    const s = this.session;
-    if (!s.audio) return;
-    this.clipAudio = new ClipAudio(this.store, s.id, s.sampleRate, this.audioSamples);
-    if (!this.audio || this.audio.sampleRate !== s.sampleRate) return;
-    try {
-      await this.audio.start(this.clipAudio, this.source, this.video, this.stream);
-      this.audioActive = true;
-    } catch (e) {
-      if (this.on.toast) this.on.toast('No audio for this clip: ' + (e && e.message));
-    }
   }
 
   // R-14: frame timing from requestVideoFrameCallback, else requestAnimationFrame.
@@ -3786,15 +3416,13 @@ class Recorder {
       let t;
       if (this.source === 'file') t = (meta ? meta.mediaTime : v.currentTime) * 1000;
       else t = meta ? meta.captureTime ?? meta.expectedDisplayTime ?? now : performance.now();
-      // The performance time of the frame, for the start of the audio.
-      const perfT = this.source === 'file' ? (meta ? meta.expectedDisplayTime ?? now : performance.now()) : t;
-      this.capture(t, perfT);
+      this.capture(t);
     };
     if (useVfc) v.requestVideoFrameCallback(tick);
     else requestAnimationFrame(tick);
   }
 
-  capture(t, perfT = t) {
+  capture(t) {
     const p = this.params;
     if (t - this.lastCapture < 1000 / p.fps - 2) return;
     this.lastCapture = t;
@@ -3807,11 +3435,7 @@ class Recorder {
     }
     const v = this.video;
     if (!v.videoWidth || !v.videoHeight) return;
-    if (this.clipStartFrameTime === null) {
-      this.clipStartFrameTime = t;
-      // R-30: the clip audio starts at the first video frame.
-      if (this.audioActive) this.clipAudio.setStart(this.audio.frameAt(perfT));
-    }
+    if (this.clipStartFrameTime === null) this.clipStartFrameTime = t;
     const tsUs = this.sessionEndUs + Math.round((t - this.clipStartFrameTime) * 1000);
     const c = coverCrop(v.videoWidth, v.videoHeight, p.w, p.h);
     this.encInFlight++;
@@ -3907,8 +3531,6 @@ class Recorder {
   async pause(reason) {
     if (this.state !== ST.RECORDING) return;
     this.setState(ST.PAUSING); // step 1: the capture loop stops
-    const audioStopped = this.audioActive ? this.audio.stop() : Promise.resolve(); // and the audio
-    this.audioActive = false;
     this.unlockScreen();
     if (reason && this.on.toast) this.on.toast(reason);
     await this.chain;
@@ -3922,28 +3544,15 @@ class Recorder {
       this.setState(ST.IDLE);
       return;
     }
-    await audioStopped;
     if (!this.clipFrames) {
-      // No frame in this clip: no new pause point and no audio. The overlay stays.
-      this.clipAudio = null;
+      // No frame in this clip: no new pause point. The overlay stays.
       this.clip--;
       this.setState(ST.PAUSED);
       if (this.on.paused) this.on.paused(null, null);
       return;
     }
     this.sessionEndUs = this.lastTsUs + Math.round(1e6 / this.params.fps);
-    await this.finishAudio(); // step 5
     await this.makePoint(this.clipDrops);
-  }
-
-  // Plan §8.4 step 5 (R-30): the clip audio gets exactly the length of the clip video.
-  async finishAudio() {
-    const s = this.session;
-    if (!s.audio) return;
-    const target = Math.round((this.sessionEndUs * s.sampleRate) / 1e6);
-    const clip = this.clipAudio || new ClipAudio(this.store, s.id, s.sampleRate, this.audioSamples);
-    this.audioSamples = await clip.finish(target - this.audioSamples);
-    this.clipAudio = null;
   }
 
   // Plan §8.4 steps 4, 6, and 7: a pause point at the current end of the session.
@@ -3960,7 +3569,7 @@ class Recorder {
   }
 
   async putPoint(p) {
-    const point = { sessionId: this.session.id, audioSamples: this.audioSamples, settings: { ...this.settings }, ...p };
+    const point = { sessionId: this.session.id, settings: { ...this.settings }, ...p };
     await this.store.putPoint(point);
     this.points = p.n;
     this.pointList[p.n] = { n: p.n, frameIndex: p.frameIndex, tsUs: p.tsUs, drops: p.drops, thumb: p.thumb, settings: point.settings };
@@ -3993,7 +3602,7 @@ class Recorder {
     try {
       await this.revertTo(n);
     } catch (e) {
-      this.setState(ST.PAUSED);
+      this.setState(ST.PAUSED); // a failed revert must not stay busy
       throw e;
     }
   }
@@ -4001,7 +3610,7 @@ class Recorder {
   async revertTo(n) {
     const p = await this.store.getPoint(this.session.id, n);
     if (!p || !p.refY) throw new Error(`No pause point ${n}`);
-    await this.store.truncate(this.session.id, p.frameIndex, n, p.audioSamples || 0); // steps 1 to 3
+    await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 and 2 (no audio: D20)
     this.dec.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV }); // step 4
     this.settings = { ...p.settings }; // step 6
     this.enc.postMessage({ cmd: 'settings', settings: this.settings });
@@ -4020,7 +3629,6 @@ class Recorder {
     this.clip = p.n;
     this.sessionEndUs = p.tsUs;
     this.lastTsUs = p.tsUs;
-    this.audioSamples = p.audioSamples || 0;
     // Each clip after the first starts with a hidden I-frame at its pause point.
     this.cuts = this.pointList.filter((q) => q && q.n >= 1 && q.frameIndex < this.frameCount).map((q) => q.frameIndex);
     this.drops = this.pointList.reduce((a, q) => a + (q ? q.drops : 0), 0);
@@ -4072,18 +3680,8 @@ class Recorder {
       this.frameCount = total;
       this.clip = last.n + 1;
       this.sessionEndUs = this.lastTsUs = lastTs + Math.round(1e6 / session.fps);
-      if (session.audio) {
-        // The stored audio of the last clip: trim or pad it to the video (R-30).
-        const target = Math.round((this.sessionEndUs * session.sampleRate) / 1e6);
-        const have = await this.store.audioLength(id);
-        if (have > target) await this.store.truncateAudio(id, target);
-        else if (have < target) await storeSilence(this.store, id, session.sampleRate, have, target - have);
-        this.audioSamples = target;
-      }
       await this.makePoint(0);
     } else {
-      // Audio after the last point has no video: delete it.
-      if (session.audio) await this.store.truncateAudio(id, this.audioSamples);
       const snap = await this.snapshot();
       if (this.on.paused) this.on.paused(snap.bitmap, last.thumb);
       this.setState(ST.PAUSED);
@@ -4307,7 +3905,6 @@ const {  } = (() => {
 
 
 
-
 const $ = (id) => document.getElementById(id);
 const el = {
   body: document.body,
@@ -4318,7 +3915,7 @@ const el = {
   thumbBtn: $('thumbBtn'), thumbImg: $('thumbImg'), slider: $('opacity'), pct: $('pct'),
   orientBtn: $('orientBtn'), ratios: [...document.querySelectorAll('.ratio')],
   focusBox: $('focusBox'), expoSun: $('expoSun'),
-  gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'), micBadge: $('micBadge'),
+  gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'),
   gate: $('gate'), gateTitle: $('gateTitle'), gateText: $('gateText'), gateBtn: $('gateBtn'), gateNew: $('gateNew'),
   player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
   newVideo: $('newVideo'), confirmTitle: $('confirmTitle'), confirmText: $('confirmText'),
@@ -4366,7 +3963,6 @@ function savePrefs() {
 let store = null;
 let rec = null;
 let player = null;
-let audioCheck = null; // plan §10.1: { ctx, sampleRate } or { reason }
 let restoreSession = null; // a stored session for "Continue last video" (plan §11.6)
 
 /* ---------------- helpers ---------------- */
@@ -4475,9 +4071,7 @@ async function startStream(facing) {
   }
   stopStream();
   try {
-    // The microphone is for the audio (D11). Without it, the camera alone.
-    const stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: true })
-      .catch(() => navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: false }));
+    const stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: false });
     applyStream(stream, facing);
     return true;
   } catch (err) {
@@ -4493,8 +4087,6 @@ function applyStream(stream, facing) {
   S.stream = stream;
   S.facing = facing;
   S.hasVideo = stream.getVideoTracks().length > 0;
-  S.hasAudio = stream.getAudioTracks().length > 0;
-  if (rec) rec.stream = stream;
   clearFocus();
   el.preview.srcObject = stream;
   el.preview.classList.toggle('mirror', mirrored());
@@ -4880,7 +4472,6 @@ function refreshUI() {
   el.gearBtn.disabled = st === ST.RECORDING || st === ST.PAUSING;
   el.preview.classList.toggle('mirror', mirrored());
   el.body.setAttribute('data-preview', S.preview ? '1' : '0');
-  el.body.setAttribute('data-noaudio', audioOffReason() ? '1' : '0');
   updateSettingsSheet();
 }
 
@@ -5058,8 +4649,7 @@ function updateSettingsSheet() {
     el.info.textContent = `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
       (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '') +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
-      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}). Frames: ${rec.frameCount}. ` +
-      `Audio: ${audioOffReason() === 'aac' ? 'off (no AAC encoder)' : audioOffReason() === 'mic' ? 'microphone off' : 'on, ' + (audioCheck.sampleRate / 1000) + ' kHz'}. neomosh v${VERSION}`;
+      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}). Frames: ${rec.frameCount}. neomosh v${VERSION}`;
   }
 }
 
@@ -5133,28 +4723,12 @@ async function runExport() {
   exportButtons('running');
   exportCtl = new AbortController();
   const total = rec.frameCount;
-  const bar = (f) => (el.progress.style.width = (100 * f).toFixed(1) + '%');
   try {
     await rec.store.flush();
-    // Plan §10.3: the audio is encoded to AAC at export. Without an encoder: video only.
-    let audio = null;
-    const s = rec.session;
-    if (s.audio && rec.audioSamples > 0) {
-      if (typeof AudioEncoder === 'undefined') toast('No AAC encoder in this browser: the export has no audio.', 4000);
-      else {
-        el.exportMsg.textContent = 'Encoding the audio…';
-        audio = await encodeAudio(rec.store, s.id, s.sampleRate, rec.audioSamples, {
-          signal: exportCtl.signal, onProgress: (f) => bar(0.4 * f),
-        });
-      }
-    }
-    el.exportMsg.textContent = 'Writing the video…';
-    const base = audio ? 0.4 : 0;
     const r = await remuxOriginal(rec.params, rec.store.readFrames(rec.session.id), {
       cuts: cutModes.slice(),
       signal: exportCtl.signal,
-      onProgress: (n) => bar(base + ((1 - base) * n) / total),
-      audio,
+      onProgress: (n) => (el.progress.style.width = ((100 * n) / total).toFixed(1) + '%'),
     });
     exportBlob = new Blob(r.parts, { type: 'video/mp4' });
     exportName = `neomosh_${fileStamp()}.mp4`;
@@ -5218,8 +4792,6 @@ async function initGate() {
 }
 
 async function start(fresh) {
-  // Plan §10.1: the AudioContext and the AAC check, first, in the user gesture of this touch.
-  const audioP = audioCheck ? null : checkAudio();
   el.gateBtn.disabled = el.gateNew.disabled = true;
   if (fresh && store) {
     for (const s of await store.listSessions()) await store.deleteSession(s.id);
@@ -5236,10 +4808,6 @@ async function start(fresh) {
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
     });
-  }
-  if (audioP) {
-    audioCheck = await audioP;
-    if (audioCheck.ctx) rec.audio = new AudioCapture(audioCheck.ctx);
   }
   await startStream(S.facing); // without a camera, the gate offers a video file
   if (restoreSession) {
@@ -5277,18 +4845,6 @@ document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('cli
 el.thumbBtn.addEventListener('click', openReview);
 el.dropBadge.addEventListener('click', () => toast(`The encoder dropped ${rec ? rec.drops : 0} frames. ` +
   'Use a smaller size, a smaller search range, or a lower frame rate.', 4500));
-el.micBadge.addEventListener('click', () => {
-  const r = audioOffReason();
-  if (r) toast(r === 'aac' ? 'No audio. This browser has no AAC encoder.' : 'No audio. The microphone is off.', 3500);
-});
-
-// Plan §11.3: why there is no audio, or '' when the next clip has audio.
-function audioOffReason() {
-  if (!audioCheck || !audioCheck.ctx) return 'aac';
-  if (rec && rec.session && !rec.session.audio) return 'aac';
-  if (S.source === 'camera' && !S.hasAudio) return 'mic';
-  return '';
-}
 
 el.preview.addEventListener('loadedmetadata', layoutFrame);
 el.preview.addEventListener('resize', layoutFrame);

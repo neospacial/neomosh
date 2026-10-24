@@ -6,7 +6,6 @@ import { sessionSize, fileStamp, formatTime } from './geometry.js';
 import { Store } from './store.js';
 import { Recorder, ST } from './recorder.js';
 import { Player } from './player.js';
-import { checkAudio, AudioCapture, encodeAudio } from './audio.js';
 
 const $ = (id) => document.getElementById(id);
 const el = {
@@ -18,7 +17,7 @@ const el = {
   thumbBtn: $('thumbBtn'), thumbImg: $('thumbImg'), slider: $('opacity'), pct: $('pct'),
   orientBtn: $('orientBtn'), ratios: [...document.querySelectorAll('.ratio')],
   focusBox: $('focusBox'), expoSun: $('expoSun'),
-  gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'), micBadge: $('micBadge'),
+  gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'),
   gate: $('gate'), gateTitle: $('gateTitle'), gateText: $('gateText'), gateBtn: $('gateBtn'), gateNew: $('gateNew'),
   player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
   newVideo: $('newVideo'), confirmTitle: $('confirmTitle'), confirmText: $('confirmText'),
@@ -66,7 +65,6 @@ function savePrefs() {
 let store = null;
 let rec = null;
 let player = null;
-let audioCheck = null; // plan §10.1: { ctx, sampleRate } or { reason }
 let restoreSession = null; // a stored session for "Continue last video" (plan §11.6)
 
 /* ---------------- helpers ---------------- */
@@ -175,9 +173,7 @@ async function startStream(facing) {
   }
   stopStream();
   try {
-    // The microphone is for the audio (D11). Without it, the camera alone.
-    const stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: true })
-      .catch(() => navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: false }));
+    const stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: false });
     applyStream(stream, facing);
     return true;
   } catch (err) {
@@ -193,8 +189,6 @@ function applyStream(stream, facing) {
   S.stream = stream;
   S.facing = facing;
   S.hasVideo = stream.getVideoTracks().length > 0;
-  S.hasAudio = stream.getAudioTracks().length > 0;
-  if (rec) rec.stream = stream;
   clearFocus();
   el.preview.srcObject = stream;
   el.preview.classList.toggle('mirror', mirrored());
@@ -580,7 +574,6 @@ function refreshUI() {
   el.gearBtn.disabled = st === ST.RECORDING || st === ST.PAUSING;
   el.preview.classList.toggle('mirror', mirrored());
   el.body.setAttribute('data-preview', S.preview ? '1' : '0');
-  el.body.setAttribute('data-noaudio', audioOffReason() ? '1' : '0');
   updateSettingsSheet();
 }
 
@@ -758,8 +751,7 @@ function updateSettingsSheet() {
     el.info.textContent = `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
       (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '') +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
-      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}). Frames: ${rec.frameCount}. ` +
-      `Audio: ${audioOffReason() === 'aac' ? 'off (no AAC encoder)' : audioOffReason() === 'mic' ? 'microphone off' : 'on, ' + (audioCheck.sampleRate / 1000) + ' kHz'}. neomosh v${VERSION}`;
+      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}). Frames: ${rec.frameCount}. neomosh v${VERSION}`;
   }
 }
 
@@ -833,28 +825,12 @@ async function runExport() {
   exportButtons('running');
   exportCtl = new AbortController();
   const total = rec.frameCount;
-  const bar = (f) => (el.progress.style.width = (100 * f).toFixed(1) + '%');
   try {
     await rec.store.flush();
-    // Plan §10.3: the audio is encoded to AAC at export. Without an encoder: video only.
-    let audio = null;
-    const s = rec.session;
-    if (s.audio && rec.audioSamples > 0) {
-      if (typeof AudioEncoder === 'undefined') toast('No AAC encoder in this browser: the export has no audio.', 4000);
-      else {
-        el.exportMsg.textContent = 'Encoding the audio…';
-        audio = await encodeAudio(rec.store, s.id, s.sampleRate, rec.audioSamples, {
-          signal: exportCtl.signal, onProgress: (f) => bar(0.4 * f),
-        });
-      }
-    }
-    el.exportMsg.textContent = 'Writing the video…';
-    const base = audio ? 0.4 : 0;
     const r = await remuxOriginal(rec.params, rec.store.readFrames(rec.session.id), {
       cuts: cutModes.slice(),
       signal: exportCtl.signal,
-      onProgress: (n) => bar(base + ((1 - base) * n) / total),
-      audio,
+      onProgress: (n) => (el.progress.style.width = ((100 * n) / total).toFixed(1) + '%'),
     });
     exportBlob = new Blob(r.parts, { type: 'video/mp4' });
     exportName = `neomosh_${fileStamp()}.mp4`;
@@ -918,8 +894,6 @@ async function initGate() {
 }
 
 async function start(fresh) {
-  // Plan §10.1: the AudioContext and the AAC check, first, in the user gesture of this touch.
-  const audioP = audioCheck ? null : checkAudio();
   el.gateBtn.disabled = el.gateNew.disabled = true;
   if (fresh && store) {
     for (const s of await store.listSessions()) await store.deleteSession(s.id);
@@ -936,10 +910,6 @@ async function start(fresh) {
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
     });
-  }
-  if (audioP) {
-    audioCheck = await audioP;
-    if (audioCheck.ctx) rec.audio = new AudioCapture(audioCheck.ctx);
   }
   await startStream(S.facing); // without a camera, the gate offers a video file
   if (restoreSession) {
@@ -977,18 +947,6 @@ document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('cli
 el.thumbBtn.addEventListener('click', openReview);
 el.dropBadge.addEventListener('click', () => toast(`The encoder dropped ${rec ? rec.drops : 0} frames. ` +
   'Use a smaller size, a smaller search range, or a lower frame rate.', 4500));
-el.micBadge.addEventListener('click', () => {
-  const r = audioOffReason();
-  if (r) toast(r === 'aac' ? 'No audio. This browser has no AAC encoder.' : 'No audio. The microphone is off.', 3500);
-});
-
-// Plan §11.3: why there is no audio, or '' when the next clip has audio.
-function audioOffReason() {
-  if (!audioCheck || !audioCheck.ctx) return 'aac';
-  if (rec && rec.session && !rec.session.audio) return 'aac';
-  if (S.source === 'camera' && !S.hasAudio) return 'mic';
-  return '';
-}
 
 el.preview.addEventListener('loadedmetadata', layoutFrame);
 el.preview.addEventListener('resize', layoutFrame);

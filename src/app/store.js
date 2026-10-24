@@ -28,7 +28,6 @@ export function openDb() {
       if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' });
       if (!db.objectStoreNames.contains('frames')) db.createObjectStore('frames', { keyPath: ['sessionId', 'index'] });
       if (!db.objectStoreNames.contains('points')) db.createObjectStore('points', { keyPath: ['sessionId', 'n'] });
-      if (!db.objectStoreNames.contains('audio')) db.createObjectStore('audio', { keyPath: ['sessionId', 'chunk'] });
     };
     r.onsuccess = () => resolve(r.result);
     r.onerror = () => reject(r.error);
@@ -64,9 +63,9 @@ export class Store {
   }
 
   async deleteSession(id) {
-    const tx = this.db.transaction(['sessions', 'frames', 'points', 'audio'], 'readwrite');
+    const tx = this.db.transaction(['sessions', 'frames', 'points'], 'readwrite');
     tx.objectStore('sessions').delete(id);
-    for (const s of ['frames', 'points', 'audio']) tx.objectStore(s).delete(range(id));
+    for (const s of ['frames', 'points']) tx.objectStore(s).delete(range(id));
     return done(tx);
   }
 
@@ -96,57 +95,14 @@ export class Store {
     return req(tx.objectStore('frames').count(range(id)));
   }
 
-  // Plan §12.3 steps 1 to 3: delete the frames from frameIndex, the points after n, and the audio
-  // from audioSamples.
-  async truncate(id, frameIndex, n, audioSamples = 0) {
-    await this.truncateAudio(id, audioSamples);
+  // Plan §12.3: delete the frames from frameIndex and the points after n (no audio: D20).
+  async truncate(id, frameIndex, n) {
     this.pending = this.pending.filter((f) => f.index < frameIndex);
     await this.flush();
     const tx = this.db.transaction(['frames', 'points'], 'readwrite');
     tx.objectStore('frames').delete(range(id, frameIndex));
     tx.objectStore('points').delete(range(id, n + 1));
     return done(tx);
-  }
-
-  // Audio (plan §10.2): chunks of interleaved stereo Int16 PCM. Key [sessionId, chunk], with
-  // chunk = startSample (the samples are counted for each channel).
-  async putAudio(id, startSample, pcm) {
-    const tx = this.db.transaction('audio', 'readwrite');
-    tx.objectStore('audio').put({ sessionId: id, chunk: startSample, startSample, pcm });
-    return done(tx);
-  }
-
-  // Delete the audio from sample n. The chunk that crosses n is cut.
-  async truncateAudio(id, n) {
-    const tx = this.db.transaction('audio', 'readwrite');
-    const os = tx.objectStore('audio');
-    os.delete(range(id, n));
-    if (n <= 0) return done(tx);
-    const prev = await req(os.openCursor(IDBKeyRange.bound([id, 0], [id, n], false, true), 'prev'));
-    if (prev && prev.value.startSample + prev.value.pcm.length / 2 > n) {
-      const c = prev.value;
-      os.put({ ...c, pcm: c.pcm.slice(0, (n - c.startSample) * 2) });
-    }
-    return done(tx);
-  }
-
-  // The count of stored samples (the end of the last chunk).
-  async audioLength(id) {
-    const tx = this.db.transaction('audio');
-    const c = await req(tx.objectStore('audio').openCursor(range(id), 'prev'));
-    return c ? c.value.startSample + c.value.pcm.length / 2 : 0;
-  }
-
-  async *readAudio(id) {
-    let from = 0;
-    for (;;) {
-      const tx = this.db.transaction('audio');
-      const list = await req(tx.objectStore('audio').getAll(range(id, from), 16));
-      if (!list.length) return;
-      for (const c of list) yield c;
-      const last = list[list.length - 1];
-      from = last.startSample + 1;
-    }
   }
 
   async getPoint(id, n) {
