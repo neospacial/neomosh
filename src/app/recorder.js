@@ -160,6 +160,7 @@ export class Recorder {
 
   onCap(m) {
     if (m.cmd === 'capDrop') this.countDrops(m.n, m.kind);
+    else if (m.cmd === 'capMethod') this.capMethod = `${m.method}; bitmap ${m.bitmapMs.toFixed(1)} ms, draw ${m.drawMs.toFixed(1)} ms`;
     else if (m.cmd === 'capMismatch') {
       // The frames are turned against the <video>: use the page path from now on.
       this.noCapWorker = true;

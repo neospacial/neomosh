@@ -64,6 +64,29 @@ function encodeRgba(m) {
   self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0, capMs: m.grabMs }, [pkt.bits.buffer]);
 }
 
+// Two ways to crop and scale a camera frame. 'bitmap': createImageBitmap with resize (the GPU on
+// most phones), then read the small picture. 'draw': draw the full frame on the canvas. The fastest
+// depends on the device, so the worker measures both on the first frames and keeps the faster one.
+const CAP_WARM = 8, CAP_TRIAL = 12;
+function capMethod() {
+  if (cap.method) return cap.method;
+  const n = cap.trial.bitmap.length + cap.trial.draw.length + cap.warm;
+  return n < CAP_WARM + CAP_TRIAL ? 'bitmap' : 'draw';
+}
+function capTimed(method, ms) {
+  if (cap.method) return;
+  if (cap.warm < CAP_WARM) {
+    cap.warm++;
+    return;
+  }
+  cap.trial[method].push(ms);
+  if (cap.trial.draw.length >= CAP_TRIAL) {
+    const med = (a) => a.slice().sort((x, y) => x - y)[a.length >> 1];
+    cap.method = med(cap.trial.bitmap) <= med(cap.trial.draw) ? 'bitmap' : 'draw';
+    self.postMessage({ cmd: 'capMethod', method: cap.method, bitmapMs: med(cap.trial.bitmap), drawMs: med(cap.trial.draw) });
+  }
+}
+
 // One clip from the camera. m: { readable | track, fps, mirror, sessionEndUs, seq, vw, vh }.
 async function captureClip(m, run) {
   // A short buffer absorbs short delays of this worker (the camera keeps its pool of frames).
@@ -109,10 +132,25 @@ async function captureClip(m, run) {
       const tsUs = m.sessionEndUs + Math.round((t - start) * 1000);
       const t0 = performance.now();
       const c = coverCrop(fw, fh, w, h);
+      const method = capMethod();
       ctx.setTransform(m.mirror ? -1 : 1, 0, 0, 1, m.mirror ? w : 0, 0);
-      ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+      if (method === 'bitmap') {
+        let bitmap = null;
+        try {
+          bitmap = await createImageBitmap(frame, c.sx, c.sy, c.sw, c.sh, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' });
+        } catch {
+          cap.method = 'draw'; // not supported: draw the frame
+        }
+        if (bitmap) {
+          ctx.drawImage(bitmap, 0, 0);
+          bitmap.close();
+        } else ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+      } else {
+        ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+      }
       frame.close();
       const rgba = ctx.getImageData(0, 0, w, h).data;
+      capTimed(method, performance.now() - t0);
       cap.inFlight++;
       sent++;
       cap.port.postMessage({ cmd: 'rgba', rgba, tsUs, seq: seq++, grabMs: performance.now() - t0 }, [rgba.buffer]);
@@ -130,7 +168,7 @@ const handlers = {
   init(m) {
     initCanvas(m.w, m.h);
     if (m.role === 'cap') {
-      cap = { port: m.port, inFlight: 0, run: 0, reader: null };
+      cap = { port: m.port, inFlight: 0, run: 0, reader: null, method: null, warm: 0, trial: { bitmap: [], draw: [] } };
       cap.port.onmessage = (e) => {
         if (e.data.cmd === 'ack') cap.inFlight--;
       };
