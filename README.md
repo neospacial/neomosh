@@ -63,7 +63,7 @@ Requirements: Node.js 20 or later. FFmpeg and ffprobe for the tests.
 
 | Command | Result |
 |---|---|
-| `node tools/build.mjs` | Makes `dist/neomosh-v0.1.0.html` and `dist/neomosh-bench-v0.1.0.html` |
+| `node tools/build.mjs` | Makes `dist/neomosh-v0.1.0.html` and `dist/neomosh-bench-v0.1.0.html`, and copies the app to `index.html` (the page for GitHub Pages) |
 | `node tools/build-wasm.mjs` | Compiles `src/codec/wasm/kernels.c` to WebAssembly (needs clang with the wasm32 target). Only after a change to the C code: the compiled module is in the repository |
 | `node tests/run.mjs [filter]` | Runs the tests. Output files go to `tests/out/` |
 | `node tools/bench.mjs [frames]` | Runs the encoder benchmark in Node |
