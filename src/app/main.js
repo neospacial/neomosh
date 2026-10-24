@@ -418,7 +418,7 @@ function onState(st) {
   if (st !== ST.RECORDING && !el.fileVideo.paused) el.fileVideo.pause();
   if (S.source === 'file') updateFileBar();
   // The time in the pill changes only while recording. No timer runs in the other states.
-  const ticking = st === ST.RECORDING || st === ST.PAUSING;
+  const ticking = st === ST.RECORDING || st === ST.PAUSING || st === ST.BLOOMING;
   if (ticking && !pillTimer) pillTimer = setInterval(updatePill, 250);
   if (!ticking && pillTimer) {
     clearInterval(pillTimer);
@@ -673,6 +673,8 @@ function refreshUI() {
   el.srcCamera.disabled = el.srcFile.disabled = !idleOrPaused;
   el.srcCamera.classList.toggle('active', S.source === 'camera');
   el.srcFile.classList.toggle('active', S.source === 'file');
+  // D24: Bloom while paused, when there are frames; held down while blooming.
+  el.bloomBtn.disabled = !rec || !rec.hasFrames || (st !== ST.PAUSED && st !== ST.BLOOMING);
   el.shutter.setAttribute('aria-label', st === ST.RECORDING ? 'Pause' : st === ST.PAUSED ? 'Resume' : 'Record');
   el.flip.disabled = !S.hasVideo || !S.multiCam || !idleOrPaused || S.source !== 'camera';
   const locked = sessionLocked() || !idleOrPaused;
@@ -1178,22 +1180,22 @@ el.gearBtn.addEventListener('click', () => {
 });
 el.exportBtn.addEventListener('click', openExport);
 
-// Bloom (plan §15): hold the button (or the B key) while recording.
+// Bloom (D24): hold the button (or the B key) while paused. It makes a bloom clip.
 el.bloomBtn.addEventListener('pointerdown', (e) => {
   if (!rec) return;
   e.preventDefault();
   try {
     el.bloomBtn.setPointerCapture(e.pointerId);
   } catch { /* no capture */ }
-  rec.setBloom(true);
+  rec.startBloom();
 });
-for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) el.bloomBtn.addEventListener(ev, () => rec && rec.setBloom(false));
+for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) el.bloomBtn.addEventListener(ev, () => rec && rec.stopBloom());
 el.bloomBtn.addEventListener('contextmenu', (e) => e.preventDefault());
 document.addEventListener('keydown', (e) => {
-  if ((e.key === 'b' || e.key === 'B') && !e.repeat && rec && !el.body.hasAttribute('data-sheet')) rec.setBloom(true);
+  if ((e.key === 'b' || e.key === 'B') && !e.repeat && rec && !el.body.hasAttribute('data-sheet')) rec.startBloom();
 });
 document.addEventListener('keyup', (e) => {
-  if ((e.key === 'b' || e.key === 'B') && rec) rec.setBloom(false);
+  if ((e.key === 'b' || e.key === 'B') && rec) rec.stopBloom();
 });
 
 // Plan §13.3: the self-test is a hidden debug setting. Open the page with #debug to show it.
@@ -1255,8 +1257,9 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// R-24: the page is hidden -> pause, not stop.
+// R-24: the page is hidden -> pause, not stop. A bloom clip ends.
 document.addEventListener('visibilitychange', () => {
+  if (document.hidden && rec) rec.stopBloom();
   if (document.hidden && rec && rec.state === ST.RECORDING) rec.pause('Recording paused.');
 });
 window.addEventListener('pagehide', () => {

@@ -167,9 +167,9 @@ body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;h
 #flip svg{width:26.4px;height:26.4px;fill:#fff}
 #flip[disabled]{opacity:.35}
 
-/* Bloom (plan §15): hold while recording. It takes the place of the camera button, which is locked then. */
+/* Bloom (D24): hold while paused. Next to the shutter, in the column of the camera button. */
 #bloomBtn{
-  grid-column:3;grid-row:1;justify-self:end;width:62px;height:62px;border-radius:50%;
+  grid-column:3;grid-row:1;justify-self:start;margin-left:14px;width:56px;height:56px;border-radius:50%;
   background:var(--glass);display:none;flex-direction:column;align-items:center;justify-content:center;gap:1px;
   touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   transition:transform .1s ease,background .1s ease;
@@ -179,8 +179,9 @@ body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;h
 #bloomBtn.on{background:var(--ios-yellow);transform:scale(1.08)}
 #bloomBtn.on svg{fill:#000}
 #bloomBtn.on span{color:#000}
-body[data-state="recording"] #bloomBtn{display:flex}
-body[data-state="recording"] #flip{visibility:hidden}
+body[data-state="paused"] #bloomBtn,body[data-state="blooming"] #bloomBtn{display:flex}
+#bloomBtn[disabled]{opacity:.35}
+body[data-state="blooming"] #mosh{display:block}
 #flip{grid-column:3;grid-row:1}
 
 /* ---------- permission gate ---------- */

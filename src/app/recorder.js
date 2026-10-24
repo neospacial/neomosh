@@ -10,6 +10,7 @@ export const ST = {
   RECORDING: 'recording',
   PAUSING: 'pausing',
   PAUSED: 'paused',
+  BLOOMING: 'blooming', // D24: a bloom clip (from PAUSED, while the button is held)
   EXPORTING: 'exporting',
   REVIEW: 'review',
 };
@@ -49,6 +50,7 @@ export class Recorder {
   }
 
   reset() {
+    this.lastP = null; // the last recorded P packet (bloom source, D24)
     this.frameCount = 0; // frames stored for this session
     this.clip = 0;
     this.cuts = []; // frame index of each hidden I-frame
@@ -78,7 +80,7 @@ export class Recorder {
 
   // Session time now (microseconds).
   get timeUs() {
-    return this.state === ST.RECORDING && this.clipFrames ? this.lastTsUs : this.sessionEndUs;
+    return (this.state === ST.RECORDING || this.state === ST.BLOOMING) && this.clipFrames ? this.lastTsUs : this.sessionEndUs;
   }
 
   async startWorkers(w, h) {
@@ -211,11 +213,72 @@ export class Recorder {
     }
   }
 
-  setBloomOff() {
-    if (!this.bloomOn) return;
-    this.bloomOn = false;
-    if (this.enc) this.enc.postMessage({ cmd: 'bloom', on: false });
+  /* Bloom (D24, plan §15): a clip made while paused. While the button is held, each frame (at the
+     session frame rate) is a copy of the last recorded P-frame, so its motion is applied again and the
+     picture flows on from the end of the last clip. On release it ends like a clip: a pause point with
+     the bloomed picture. The next recording starts with a hidden I-frame (a cut), so in a Mosh export
+     its motion moves the bloomed picture. */
+
+  // The last recorded P-frame (not a bloom frame): from RAM, else from the store (after a revert or a restore).
+  async bloomSource() {
+    if (this.lastP) return this.lastP;
+    let src = null;
+    const from = Math.max(0, this.frameCount - 600);
+    for await (const f of this.store.readFrames(this.session.id, from, this.frameCount - 1)) {
+      if (f.type === 'p' && !f.bloom) src = f;
+    }
+    return src;
+  }
+
+  // Button down. Resolves true when the bloom clip started.
+  async startBloom() {
+    if (this.state !== ST.PAUSED || !this.frameCount || this.bloomBusy) return false;
+    this.bloomWanted = true;
+    this.bloomBusy = true;
+    let src = null;
+    try {
+      await this.store.flush();
+      src = await this.bloomSource();
+    } finally {
+      this.bloomBusy = false;
+    }
+    if (!src) {
+      if (this.on.toast) this.on.toast('Bloom needs a clip with motion first. Record a clip, then pause.');
+      return false;
+    }
+    if (!this.bloomWanted || this.state !== ST.PAUSED) return false; // released before the start
+    this.clip++;
+    this.clipFrames = 0;
+    this.clipDrops = 0;
+    this.dropKinds = { enc: 0, page: 0, cap: 0 };
+    this.bloomFrames = 0;
+    this.camSkips = 0;
+    this.viewSkips = 0;
+    this.setState(ST.BLOOMING);
+    if (this.on.bloom) this.on.bloom(true);
+    this.enc.postMessage({ cmd: 'bloomStart', src: { type: src.type, qp: src.qp, bits: src.bits, bitLen: src.bitLen, hdrBits: src.hdrBits, settings: src.settings } });
+    const period = 1e6 / this.params.fps;
+    let n = 0;
+    // One frame for each frame time. When the workers are late, the tick is left out (the bloom is
+    // slower, the timeline has no gap).
+    this.bloomTimer = setInterval(() => {
+      if (this.state !== ST.BLOOMING || this.encInFlight + this.decInFlight > 2) return;
+      this.encInFlight++;
+      this.enc.postMessage({ cmd: 'bloomFrame', seq: this.seq++, tsUs: this.sessionEndUs + Math.round(n++ * period) });
+    }, period / 1000);
+    return true;
+  }
+
+  // Button up: end the bloom clip like a pause.
+  async stopBloom() {
+    this.bloomWanted = false;
+    if (this.state !== ST.BLOOMING) return;
+    clearInterval(this.bloomTimer);
+    this.bloomTimer = 0;
+    this.enc.postMessage({ cmd: 'bloomStop' });
     if (this.on.bloom) this.on.bloom(false);
+    this.setState(ST.PAUSING);
+    return this.finishClip();
   }
 
   // The page goes away (pagehide): stop the camera track of the capture at once, so that no camera
@@ -420,7 +483,7 @@ export class Recorder {
 
   onEnc(m) {
     if (m.cmd === 'error') {
-      if (m.during === 'frame' || m.during === 'rgba') this.encInFlight--;
+      if (m.during === 'frame' || m.during === 'rgba' || m.during === 'bloomFrame') this.encInFlight--;
       this.fail(`Encoder: ${m.message}`);
       return this.checkIdle();
     }
@@ -431,6 +494,7 @@ export class Recorder {
       // A bloom frame is not encoded (a copy): it does not count for the speed.
       this.encMs = this.encMs ? this.encMs * 0.9 + m.ms * 0.1 : m.ms;
       this.grabMs = this.grabMs ? this.grabMs * 0.9 + m.grabMs * 0.1 : m.grabMs;
+      if (m.pkt.type === 'p') this.lastP = m.pkt; // the source of the next bloom (D24)
     }
     if (m.capMs !== undefined) this.capMs = this.capMs ? this.capMs * 0.9 + m.capMs * 0.1 : m.capMs;
     const pkt = m.pkt;
@@ -447,8 +511,9 @@ export class Recorder {
     if (this.store.error && this.state === ST.RECORDING) this.pause();
     // R-21: the recording has priority over the live view. When the decoder is still busy with the
     // last frame, this frame gets no preview picture. The frame is decoded and stored all the same.
-    const preview = this.decInFlight === 0 && this.state === ST.RECORDING;
-    if (!preview && this.state === ST.RECORDING) this.viewSkips++;
+    const live = this.state === ST.RECORDING || this.state === ST.BLOOMING;
+    const preview = this.decInFlight === 0 && live;
+    if (!preview && live) this.viewSkips++;
     this.decInFlight++;
     this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview });
     this.checkIdle();
@@ -467,7 +532,7 @@ export class Recorder {
     if (m.cmd !== 'decoded') return;
     this.decInFlight--;
     if (m.bitmap) {
-      if (this.state === ST.RECORDING && this.on.decoded) this.on.decoded(m.bitmap);
+      if ((this.state === ST.RECORDING || this.state === ST.BLOOMING) && this.on.decoded) this.on.decoded(m.bitmap);
       else m.bitmap.close();
     }
     this.checkIdle();
@@ -481,24 +546,19 @@ export class Recorder {
     }
   }
 
-  // Bloom (plan §15): while on, each frame repeats the last P-frame of this clip. Only while recording.
-  setBloom(on) {
-    on = !!on && this.state === ST.RECORDING;
-    if (on === this.bloomOn) return;
-    this.bloomOn = on;
-    if (this.enc) this.enc.postMessage({ cmd: 'bloom', on });
-    if (this.on.bloom) this.on.bloom(on);
-  }
-
   // Plan §8.4.
   async pause(reason) {
     if (this.state !== ST.RECORDING) return;
-    this.setBloomOff();
     this.setState(ST.PAUSING); // step 1: the capture loop stops
     this.unlockScreen();
     if (reason && this.on.toast) this.on.toast(reason);
     await this.stopCapture();
     await this.chain;
+    return this.finishClip();
+  }
+
+  // The end of a clip (a recorded clip or a bloom clip), state PAUSING: steps 2 to 7 of plan §8.4.
+  async finishClip() {
     // Steps 2 and 3: wait for the encoder and the decoder.
     await new Promise((resolve) => {
       this.idleWaiter = resolve;
@@ -593,6 +653,7 @@ export class Recorder {
   }
 
   async revertTo(n) {
+    this.lastP = null; // the bloom source is found again in the store
     const p = await this.store.getPoint(this.session.id, n);
     if (!p || !p.refY) throw new Error(`No pause point ${n}`);
     await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 and 2 (no audio: D20)
@@ -632,6 +693,7 @@ export class Recorder {
 
   // Plan §11.6: continue a stored session. Returns false when it has no frames.
   async restore(session) {
+    this.lastP = null; // the bloom source is found again in the store
     this.session = session;
     this.params = streamParams(session.w, session.h, session.fps);
     this.reset();
