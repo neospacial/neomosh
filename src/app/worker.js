@@ -160,6 +160,10 @@ async function captureClip(m, run) {
           break;
         }
       }
+      // Probe (before the recording): only measure the ways, then stop. No gate, no encoder.
+      if (cap.probe) {
+        if (cap.method || ++cap.probeFrames > 80) break;
+      }
       const t = frame.timestamp / 1000;
       // A gap in the source times: when this worker waited for the frame, the camera did not give the
       // missing frames (R-19: not a drop). When the frame was ready at once, the processor dropped
@@ -169,11 +173,11 @@ async function captureClip(m, run) {
       if (missed > 0 && !late) self.postMessage({ cmd: 'capSkip', n: missed });
       const g = gate.next(t, late ? missed : 0);
       if (g.lost) self.postMessage({ cmd: 'capDrop', n: g.lost, kind: 'cap' });
-      if (!g.keep) {
+      if (!g.keep && !cap.probe) {
         frame.close();
         continue;
       }
-      if (cap.inFlight >= MAX_IN_FLIGHT) {
+      if (!cap.probe && cap.inFlight >= MAX_IN_FLIGHT) {
         // R-18, R-19: an encoder drop. The previous frame becomes longer (R-20).
         frame.close();
         self.postMessage({ cmd: 'capDrop', n: 1, kind: 'enc' });
@@ -218,6 +222,7 @@ async function captureClip(m, run) {
       frame.close();
       const ms = performance.now() - t0;
       if (!calibrated && (method !== 'yuv' || msg.cmd === 'planes')) capTimed(method, ms);
+      if (cap.probe) continue;
       cap.inFlight++;
       sent++;
       Object.assign(msg, { tsUs, seq: seq++, grabMs: ms });
@@ -238,15 +243,18 @@ const handlers = {
   init(m) {
     initCanvas(m.w, m.h);
     if (m.role === 'cap') {
-      cap = { port: m.port, inFlight: 0, run: 0, reader: null, method: null, warm: 0, trial: {}, yuv: CamYuv.create(m.w, m.h), yuvOk: undefined, calib: '', calibTries: 0 };
-      // Debug: a forced way. 'yuv' still needs a usable frame; it does not check the colours.
+      cap = { port: m.port || null, probe: !!m.probe, inFlight: 0, run: 0, reader: null, method: null, warm: 0, trial: {}, yuv: CamYuv.create(m.w, m.h), yuvOk: undefined, calib: '', calibTries: 0, probeFrames: 0 };
+      // A way from a probe before the recording (saved), or forced (debug). 'yuv' still needs a usable
+      // frame; its colour check was done by the probe.
       if (['yuv', 'bitmap', 'draw'].includes(m.method)) {
         cap.method = m.method;
         if (m.method === 'yuv') cap.yuvOk = true;
       }
-      cap.port.onmessage = (e) => {
-        if (e.data.cmd === 'ack') cap.inFlight--;
-      };
+      if (cap.port) {
+        cap.port.onmessage = (e) => {
+          if (e.data.cmd === 'ack') cap.inFlight--;
+        };
+      }
       self.postMessage({ cmd: 'ready', mstp: typeof MediaStreamTrackProcessor === 'function' });
       return;
     }
@@ -289,6 +297,12 @@ const handlers = {
   },
   // The track stops (here or on the main thread), so the stream ends after its queued frames.
   // If it does not end, cancel it.
+  // A way measured before the recording (probe): use it from the next frame.
+  capSet(m) {
+    if (!['yuv', 'bitmap', 'draw'].includes(m.method)) return;
+    cap.method = m.method;
+    if (m.method === 'yuv') cap.yuvOk = true;
+  },
   capStop() {
     cap.run++;
     if (cap.track) cap.track.stop();
