@@ -4,7 +4,7 @@ neomosh is a video recorder in one standalone HTML file. It makes a **true datam
 
 The exported file is a valid H.264 (Constrained Baseline) stream. Each conforming player shows the same moshed pictures.
 
-> Status: development. Phase 1 (codec core) is done. The recorder UI comes in Phase 3. See `neomosh-plan-v0.1.0.md`.
+> Status: development. Phase 1 (codec core) and Phase 2 (MP4 muxer and lossless export) are done. The recorder UI comes in Phase 3. See `neomosh-plan-v0.1.0.md`.
 
 ## Development
 
@@ -15,6 +15,7 @@ Requirements: Node.js 20 or later. FFmpeg and ffprobe for the tests.
 | `node tools/build.mjs` | Makes `dist/neomosh-v0.1.0.html` and `dist/neomosh-bench-v0.1.0.html` |
 | `node tests/run.mjs [filter]` | Runs the tests. Output files go to `tests/out/` |
 | `node tools/bench.mjs [frames]` | Runs the encoder benchmark in Node |
+| `node tools/sample.mjs` | Makes sample MP4 files in `samples/` for device tests |
 
 ### Benchmark on a phone
 
@@ -27,7 +28,7 @@ The page makes no network requests. The encoder p95 time must be below the frame
 
 ### Tests
 
-The tests encode synthetic video, write an Annex B `.264` file, and decode it with FFmpeg. The FFmpeg output must be byte-identical to the output of our decoder (plan §13.1). The mosh test (plan §13.2) makes sure that, after a cut, only the area along the motion path changes.
+The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` file, and decode them with FFmpeg. The FFmpeg output must be byte-identical to the output of our decoder (plan §13.1). The MP4 packets must have the correct times, durations, and sync flags. When Playwright is installed, a test also decodes the MP4 samples with the Chromium WebCodecs decoder and plays the files in a `<video>` element. The mosh test (plan §13.2) makes sure that, after a cut, only the area along the motion path changes.
 
 ### Layout
 
@@ -36,7 +37,7 @@ The tests encode synthetic video, write an Annex B `.264` file, and decode it wi
 | `src/codec/` | H.264 subset: bit I/O, tables, transform, interpolation, motion vector prediction, CAVLC, headers, colour, encoder, decoder |
 | `src/bench/` | Benchmark page and core |
 | `src/app/` | App (stub until Phase 3) |
-| `src/mux/` | MP4 muxer (Phase 2) |
+| `src/mux/` | MP4 muxer and lossless export (remux) |
 | `tools/build.mjs` | Inlines all sources into one HTML file for each page |
 | `tests/` | Node tests |
 | `dist/` | Built files |
@@ -44,5 +45,6 @@ The tests encode synthetic video, write an Annex B `.264` file, and decode it wi
 ## Known limits
 
 - The mosh needs movement. If nothing moves after a resume, the old picture stays frozen.
-- The export has only one sync frame (frame 0), unless a cut is set to Clean. Players seek slowly in long files.
+- The export has only one sync frame (frame 0), unless a cut is set to Clean. Players seek slowly in long files. Playback is normal.
+- At a Mosh cut, the hidden I-frame is not in the file. The frame before the cut stays on screen for that time, so the timeline has no gap.
 - I-frames use I_PCM (no compression). Their bitrate can be above the level limit. The level is selected only from the frame size and the macroblock rate.

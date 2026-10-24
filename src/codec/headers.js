@@ -158,24 +158,31 @@ export function sliceNal(frame, frameNum) {
 
 // Select the frames for export (plan §9.2 step 2) and give each one its frame_num.
 // cuts: array of 'mosh' | 'clean' for each cut (a cut = a hidden I-frame), or one value for all.
-// Yields { frame, index, frameNum, key }.
-export function* keptFrames(frames, cuts = 'mosh') {
+// Returns a function: frame -> { frameNum, key } for a kept frame, or null for a dropped frame.
+export function frameSelector(cuts = 'mosh') {
   let cut = 0;
   let frameNum = 0;
-  let index = 0;
-  for (const f of frames) {
-    let keep = true;
+  return (f) => {
     if (f.type === 'hiddenI') {
       const mode = typeof cuts === 'string' ? cuts : cuts[cut] || 'mosh';
-      keep = mode === 'clean';
       cut++;
+      if (mode !== 'clean') return null;
     } else if (f.type === 'idr') {
       frameNum = 0;
     }
-    if (keep) {
-      yield { frame: f, index, frameNum, key: f.type !== 'p' };
-      frameNum = (frameNum + 1) & 0xffff;
-    }
+    const k = { frameNum, key: f.type !== 'p' };
+    frameNum = (frameNum + 1) & 0xffff;
+    return k;
+  };
+}
+
+// The kept frames of a frame list. Yields { frame, index, frameNum, key }.
+export function* keptFrames(frames, cuts = 'mosh') {
+  const select = frameSelector(cuts);
+  let index = 0;
+  for (const frame of frames) {
+    const k = select(frame);
+    if (k) yield { frame, index, frameNum: k.frameNum, key: k.key };
     index++;
   }
 }
