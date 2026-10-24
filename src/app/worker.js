@@ -135,7 +135,8 @@ async function captureClip(m, run) {
   cap.reader = reader;
   cap.track = m.track || null;
   const gate = new FrameGate(m.fps);
-  const gaps = new SourceGaps();
+  const gaps = cap.gaps || (cap.gaps = new SourceGaps());
+  gaps.restart();
   let start = null, sent = 0, seq = m.seq, checked = false;
   let frame = null; // the current frame; closed in 'finally' when an error stops the loop (close() twice is no error)
   try {

@@ -121,12 +121,22 @@ export class Player {
       this.playing = true;
       if (this.on.state) this.on.state(true);
       const t0 = performance.now();
-      const ts0 = this.cur.tsUs;
+      let ts0 = this.cur.tsUs;
+      let skipAt = null; // a hidden I-frame (Mosh cut): its time slot is not played, as in the export
       let lastSnap = this.snaps.length ? this.snaps[this.snaps.length - 1].keyUs : -Infinity;
       for await (const f of this.store.readFrames(this.session.id, this.cur.index)) {
         if (!this.playing) break;
         const m = await this.decode(f, true);
         this.cur = { index: f.index + 1, tsUs: f.tsUs };
+        if (f.type === 'hiddenI') {
+          if (m.bitmap) m.bitmap.close();
+          if (skipAt === null) skipAt = f.tsUs;
+          continue;
+        }
+        if (skipAt !== null) {
+          ts0 += f.tsUs - skipAt;
+          skipAt = null;
+        }
         const due = t0 + (f.tsUs - ts0) / 1000;
         const wait = due - performance.now();
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));

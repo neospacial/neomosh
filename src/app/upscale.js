@@ -3,7 +3,7 @@
 
 import { frameSelector } from '../codec/headers.js';
 import { muxMp4 } from '../mux/mp4.js';
-import { VIDEO_TIMESCALE } from '../mux/remux.js';
+import { VIDEO_TIMESCALE, CutRetime } from '../mux/remux.js';
 import { makeWorker } from './recorder.js';
 
 // High profile first (levels 5.1, 5.0, 4.2, 4.0), then Main and Baseline.
@@ -61,13 +61,16 @@ export async function upscaleExport(workerSrc, params, config, frames, opts = {}
   try {
     wk.postMessage({ cmd: 'upInit', w: params.w, h: params.h, smooth: !!opts.smooth, ...config });
     const select = frameSelector(opts.cuts ?? 'mosh');
+    const retime = new CutRetime(); // the same times as Original mode
     let sent = 0, read = 0, t0 = null;
     for await (const f of frames) {
       check();
       read++;
-      if (select(f)) {
-        if (t0 === null) t0 = f.tsUs;
-        wk.postMessage({ cmd: 'upFrame', pkt: f, show: true, tsUs: f.tsUs - t0 });
+      if (!select(f)) retime.skip(f);
+      else {
+        const ts = retime.time(f);
+        if (t0 === null) t0 = ts;
+        wk.postMessage({ cmd: 'upFrame', pkt: f, show: true, tsUs: ts - t0 });
         sent++;
         while (sent - acks > 4) { await wait(); check(); }
       }

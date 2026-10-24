@@ -370,7 +370,7 @@ PAUSED ──► REVIEW (player, history) ──► PAUSED
 - **R-18** The encoder may have a maximum of 6 frames in flight (D19). When the capture is due and 6 frames are in flight, the app does not capture. It adds 1 to the drop count.
 - **R-19** Encoder drops count. Source frames that the frame callback did not get (rVFC `presentedFrames` jumps, because the main thread was late) also count, for the slots that they leave empty. A slow source (for example a camera at 15 fps in low light) is not a drop.
 - **R-20** A dropped frame makes the previous frame longer in the timeline (variable frame rate). The app does not change settings automatically, because that changes the look.
-- **R-21** Decoder preview frames may be skipped when the decoder is late. This does not change the file and is not reported.
+- **R-21** Decoder preview frames may be skipped when the decoder is late. This does not change the file (the recording has priority over the live view). It is not a drop; the info section shows the count ("view skipped").
 - Warning UI: §11.3.
 
 ### 8.4 Pause
@@ -424,7 +424,7 @@ This is the efficient bake. It does not decode, does not re-encode, and does not
 1. Read the frame packets from IndexedDB in sequence.
 2. Select the frames to keep: all frames of type `idr` and `p`. For a cut set to **Clean**, also keep that cut's `hiddenI` frame.
 3. For each kept frame, write the slice header with the correct `frame_num` (§6.4), add the slice data bits and the trailing bits, apply emulation prevention, and add a 4-byte length prefix (MP4 uses length-prefixed NAL units, not start codes).
-4. Sample duration = next timestamp − this timestamp. Last frame = 1/fps. Timescale 90000. Carry the rounding error forward.
+4. Sample duration = next timestamp − this timestamp. Last frame = 1/fps. Timescale 90000. Carry the rounding error forward. At a Mosh cut, remove the time slot of the hidden I-frame: the frames after it move earlier by that slot, so the last picture before the cut is not held for two frame times (it looked like a dropped frame). The Upscale export and the History player use the same times.
 5. Mux with the MP4 muxer (§9.4). SPS and PPS go in `avcC`.
 
 Clean cut note: with Clean, the hidden I-frame is shown, and the following P-frames apply to the correct reference. The result is a normal cut. The stream stays valid.

@@ -2,6 +2,7 @@
 
 import { FrameGate, SourceGaps } from '../src/app/capture.js';
 import { colourMatrix } from '../src/app/camyuv.js';
+import { timelineCheck } from '../src/app/selftest.js';
 import { Kernels } from '../src/codec/wasm.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -57,6 +58,17 @@ function scaleYuv(k, src, sw, sh, w, h, mirror, M) {
 const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
 export const tests = [
+  {
+    name: 'timeline check: lost frames in the file are found; a slow camera and cuts are not gaps',
+    fn() {
+      const clip = (c, n, step, t0, skip = []) => Array.from({ length: n }, (_, i) => i).filter((i) => !skip.includes(i)).map((i) => ({ type: 'p', clip: c, tsUs: t0 + i * step }));
+      const ok = [...clip(1, 30, 33333, 0), { type: 'hiddenI', clip: 2, tsUs: 1e6 }, ...clip(2, 30, 50000, 1.03e6)];
+      assert(/Gaps: 0 /.test(timelineCheck(ok, 30, 0)), timelineCheck(ok, 30, 0));
+      const bad = clip(1, 60, 33333, 0, [10, 20, 21]);
+      const t = timelineCheck(bad, 30, 1);
+      assert(/Gaps: 2 \(about 3 frames lost/.test(t) && /not counted/.test(t), t);
+    },
+  },
   {
     name: 'camera YUV kernel: identity, mirror, NV12 = I420, colour matrix (D22)',
     fn() {
@@ -258,9 +270,14 @@ export const tests = [
         const info = await page.$eval('#info', (e) => e.textContent);
         await page.click('#settingsSheet .done');
         assert(/Capture: worker \(yuv/.test(info), `the YUV way was not used: ${info}`);
-        const f = (await h.db()).frames.filter((x) => x.type !== 'hiddenI').slice(-40);
-        const rate = (f.length - 1) / ((f[f.length - 1].tsUs - f[0].tsUs) / 1e6);
-        assert(Math.abs(rate - 30) < 1, `rate ${rate.toFixed(2)}`);
+        // The last clip: each source frame is stored, or counted (a drop, or a camera skip).
+        const all = (await h.db()).frames;
+        const f = all.slice(all.map((x) => x.type).lastIndexOf('hiddenI') + 1);
+        const span = (f[f.length - 1].tsUs - f[0].tsUs) / 1e6;
+        const n = (re) => Number((info.match(re) || [0, 0])[1]);
+        const counted = n(/this clip (\d+)/) + n(/the camera skipped (\d+)/);
+        const missing = Math.round(span * 30) + 1 - f.length;
+        assert(missing <= counted + 1, `${missing} frames missing, ${counted} counted (${info})`);
         const db = await h.db();
         const mp4 = await h.exportMp4('camyuv.mp4');
         const s = db.sessions[0];
@@ -281,11 +298,17 @@ export const tests = [
         run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=960x540:rate=30,eq=contrast=0.75:saturation=0.6,noise=alls=14:allf=t',
           '-t', '4', '-pix_fmt', 'yuv420p', y4m]);
       }
-      const h = await openApp('probe', { cameraFile: y4m });
+      // A stale saved speed with a slow capture (from an old, slower way): the hint must use the probe.
+      const init = () => localStorage.setItem('neomosh.speed2', JSON.stringify({ enc: 5, cap: 200 }));
+      const h = await openApp('probe', { cameraFile: y4m, init });
       try {
         const { page } = h;
         await h.start();
         await page.waitForFunction(() => localStorage.getItem('neomosh.capture'), null, { timeout: 15000 });
+        await page.click('#gearBtn');
+        const hint = await page.$eval('#fpsHint', (e) => (e.hidden ? '' : e.textContent));
+        await page.click('#settingsSheet .done');
+        assert(!hint, `the frame-rate hint must use the probe time: ${hint}`);
         await h.clip(3000);
         const info = async () => {
           await page.click('#gearBtn');
