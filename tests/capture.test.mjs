@@ -1,9 +1,11 @@
 // R-14, R-19: the frame gate keeps the correct count of source frames, with camera jitter.
 
 import { FrameGate, SourceGaps } from '../src/app/capture.js';
+import { colourMatrix } from '../src/app/camyuv.js';
+import { Kernels } from '../src/codec/wasm.js';
 import path from 'node:path';
 import { assert, OUT_DIR } from './lib/session.mjs';
-import { chromium, openApp, run } from './lib/app.mjs';
+import { chromium, openApp, run, checkMp4 } from './lib/app.mjs';
 
 // Source frames at srcFps with uniform jitter. Returns the kept times and the lost slots.
 function simulate(srcFps, fps, jitter, n = 3000, skipEvery = 0) {
@@ -24,7 +26,72 @@ function simulate(srcFps, fps, jitter, n = 3000, skipEvery = 0) {
   return { kept, lost, rate: ((kept.length - 1) * 1000) / span, maxGap: Math.max(...kept.slice(1).map((t, i) => t - kept[i])) };
 }
 
+// Run the scale_yuv kernel. src: { y, u, v } planar, or NV12 when uv is given.
+function scaleYuv(k, src, sw, sh, w, h, mirror, M) {
+  const cw = (w + 15 & ~15), chh = (h + 15 & ~15);
+  const n = cw * chh, cn = n >> 2;
+  const sy = k.alloc(sw * sh), sc = k.alloc(sw * sh), out = k.alloc(n * 1.5), mp = k.alloc(40);
+  const scratch = k.alloc(4 * 8 * w), half = k.alloc(sw * sh);
+  k.u8(sy, sw * sh).set(src.y);
+  let su, sv, sus, step;
+  if (src.uv) {
+    k.u8(sc, src.uv.length).set(src.uv);
+    [su, sv, sus, step] = [sc, sc + 1, sw, 2];
+  } else {
+    k.u8(sc, src.u.length).set(src.u);
+    k.u8(sc + src.u.length, src.v.length).set(src.v);
+    [su, sv, sus, step] = [sc, sc + src.u.length, sw >> 1, 1];
+  }
+  k.i32(mp, 10).set(M);
+  k.x.scale_yuv(sy, sw, su, sv, sus, step, sw, sh, out, out + n, out + n + cn, w, h, cw, chh, mirror ? 1 : 0, mp, scratch, half);
+  const o = k.u8(out, n * 1.5).slice();
+  const crop = (off, pw, ph, stride) => {
+    const r = new Uint8Array(pw * ph);
+    for (let y = 0; y < ph; y++) r.set(o.subarray(off + y * stride, off + y * stride + pw), y * pw);
+    return r;
+  };
+  return { y: crop(0, w, h, cw), u: crop(n, w >> 1, h >> 1, cw >> 1), v: crop(n + cn, w >> 1, h >> 1, cw >> 1) };
+}
+
+const same = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 export const tests = [
+  {
+    name: 'camera YUV kernel: identity, mirror, NV12 = I420, colour matrix (D22)',
+    fn() {
+      const k = Kernels.create();
+      if (!k) return console.log('      (skipped: no WebAssembly)');
+      const M709 = colourMatrix({ matrix: 'bt709', fullRange: false });
+      assert(same(Array.from(M709), [4096, 0, 0, 0, 4096, 0, 0, 0, 4096, 16]), `709 limited is the identity: ${Array.from(M709)}`);
+      const w = 64, h = 48;
+      const y = new Uint8Array(w * h).map((_, i) => 16 + ((i * 7) % 220));
+      const u = new Uint8Array(w * h / 4).map((_, i) => 60 + ((i * 3) % 130));
+      const v = new Uint8Array(w * h / 4).map((_, i) => 190 - ((i * 5) % 120));
+      const id = scaleYuv(k, { y, u, v }, w, h, w, h, false, M709);
+      assert(same(id.y, y) && same(id.u, u) && same(id.v, v), 'same size, same colour space: a copy');
+      const mir = scaleYuv(k, { y, u, v }, w, h, w, h, true, M709);
+      for (let r = 0; r < h; r++) for (let x = 0; x < w; x++) assert(mir.y[r * w + x] === y[r * w + w - 1 - x], 'mirror');
+      const uv = new Uint8Array(w * h / 2);
+      for (let i = 0; i < u.length; i++) [uv[2 * i], uv[2 * i + 1]] = [u[i], v[i]];
+      const nv = scaleYuv(k, { y, uv }, w, h, 40, 30, false, M709);
+      const pl = scaleYuv(k, { y, u, v }, w, h, 40, 30, false, M709);
+      assert(same(nv.y, pl.y) && same(nv.u, pl.u) && same(nv.v, pl.v), 'NV12 and I420 give the same output');
+      // A 4x reduction (two box halvings) of a flat picture stays flat.
+      const flat = scaleYuv(k, { y: new Uint8Array(256 * 192).fill(100), u: new Uint8Array(128 * 96).fill(90), v: new Uint8Array(128 * 96).fill(170) }, 256, 192, 64, 48, false, M709);
+      assert(flat.y.every((x) => x === 100) && flat.u.every((x) => x === 90) && flat.v.every((x) => x === 170), 'flat after 4x reduction');
+      // BT.601 full range to BT.709 limited: compare with a float reference on flat colours.
+      const M = colourMatrix({ matrix: 'smpte170m', fullRange: true });
+      for (const [Y, U, V] of [[0, 128, 128], [255, 128, 128], [128, 128, 128], [82, 90, 240], [145, 54, 34], [41, 240, 110]]) {
+        const r = scaleYuv(k, { y: new Uint8Array(16 * 16).fill(Y), u: new Uint8Array(64).fill(U), v: new Uint8Array(64).fill(V) }, 16, 16, 16, 16, false, M);
+        const yn = Y / 255, un = (U - 128) / 255, vn = (V - 128) / 255;
+        const R = yn + 1.402 * vn, B = yn + 1.772 * un, G = (yn - 0.299 * R - 0.114 * B) / 0.587;
+        const Y7 = 0.2126 * R + 0.7152 * G + 0.0722 * B;
+        const want = [16 + 219 * Y7, 128 + 224 * (B - Y7) / 1.8556, 128 + 224 * (R - Y7) / 1.5748].map((x) => Math.min(255, Math.max(0, Math.round(x))));
+        const got = [r.y[0], r.u[0], r.v[0]];
+        assert(got.every((g, i) => Math.abs(g - want[i]) <= 1), `601 full (${Y},${U},${V}) -> ${got}, want ${want}`);
+      }
+    },
+  },
   {
     name: 'source gaps: missed frames are counted; a slow or jittery source is not',
     fn() {
@@ -151,6 +218,53 @@ export const tests = [
         await page.click('#gearBtn');
         const info = await page.$eval('#info', (e) => e.textContent);
         console.log(`      ${info.match(/Capture: \w+/)[0]}`);
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
+  {
+    name: 'app with a camera-like source: the YUV colour check passes, the fastest way wins; forced YUV records at 30 fps',
+    async fn() {
+      if (!chromium) return console.log('      (skipped: Playwright is not available)');
+      const y4m = path.join(OUT_DIR, 'camnat540.y4m');
+      run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=960x540:rate=30,eq=contrast=0.75:saturation=0.6,noise=alls=14:allf=t',
+        '-t', '4', '-pix_fmt', 'yuv420p', y4m]);
+      // The automatic choice: the colour check passes, and the way with the least time wins.
+      const h0 = await openApp('camauto', { cameraFile: y4m });
+      try {
+        await h0.start();
+        await h0.clip(2500);
+        await h0.page.click('#gearBtn');
+        const info = await h0.page.$eval('#info', (e) => e.textContent);
+        const m = info.match(/Capture: worker \(([a-z]+); ([^;]*); yuv check Y ([\d.]+), U ([\d.]+), V ([\d.]+)/);
+        console.log(`      ${m ? m[0] : info}`);
+        assert(m && Number(m[3]) < 3 && Number(m[4]) < 3 && Number(m[5]) < 3, 'the YUV colour check must pass');
+        const times = Object.fromEntries(m[2].split(', ').map((t) => t.split(' ')).map(([k, v]) => [k, Number(v)]));
+        assert(times[m[1]] === Math.min(...Object.values(times)), `the chosen way is not the fastest: ${m[2]}`);
+      } finally {
+        await h0.close();
+      }
+      // The YUV way (forced): records at 30 fps, valid export.
+      const h = await openApp('camyuv', { cameraFile: y4m, hash: '#capture=yuv' });
+      try {
+        const { page } = h;
+        await h.start();
+        await h.clip(2500);
+        await h.clip(2500);
+        await page.click('#gearBtn');
+        const info = await page.$eval('#info', (e) => e.textContent);
+        await page.click('#settingsSheet .done');
+        assert(/Capture: worker \(yuv/.test(info), `the YUV way was not used: ${info}`);
+        const f = (await h.db()).frames.filter((x) => x.type !== 'hiddenI').slice(-40);
+        const rate = (f.length - 1) / ((f[f.length - 1].tsUs - f[0].tsUs) / 1e6);
+        assert(Math.abs(rate - 30) < 1, `rate ${rate.toFixed(2)}`);
+        const db = await h.db();
+        const mp4 = await h.exportMp4('camyuv.mp4');
+        const s = db.sessions[0];
+        const c = checkMp4(mp4, s.w, s.h);
+        assert(c.count === db.frames.filter((x) => x.type !== 'hiddenI').length, 'frame count');
         assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
       } finally {
         await h.close();
