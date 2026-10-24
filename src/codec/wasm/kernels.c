@@ -677,6 +677,107 @@ void rgba_to_yuv420(const u8 *rgba, int w, int h, int codedW, int codedH, u8 *Y,
   pad_coded(V, cw, ch, cW, codedH >> 1);
 }
 
+/* Camera YUV (I420 or NV12, D22) to the encoder input: crop already done by the caller (copyTo with
+   a rect), bilinear scale sw x sh -> w x h, optional mirror, colour conversion with a 3x3 matrix
+   (Q12) from the source YUV (Y offset soY) to BT.709 limited range, then coded-size padding.
+   su, sv: the chroma planes (NV12: su = the UV plane, sv = su + 1, cstep = 2). sus: chroma stride.
+   M: a00 a01 a02 a10 a11 a12 a20 a21 a22 soY. scratch: 4 * w + 4 * (w / 2) + 2 * w ints. */
+static void bil_cols(int *idx, int *wt, int n, int sn, int mirror) {
+  for (int i = 0; i < n; i++) {
+    const int o = mirror ? n - 1 - i : i;
+    int pos = (int)((((long long)(2 * o + 1) * sn) << 8) / (2 * n)) - 128;
+    if (pos < 0) pos = 0;
+    int i0 = pos >> 8;
+    if (i0 > sn - 1) i0 = sn - 1;
+    idx[i] = i0;
+    wt[i] = i0 + 1 < sn ? (pos & 255) : 0;
+  }
+}
+
+static inline int bil_row_pos(int o, int n, int sn, int *fr) {
+  int pos = (int)((((long long)(2 * o + 1) * sn) << 8) / (2 * n)) - 128;
+  if (pos < 0) pos = 0;
+  int i0 = pos >> 8;
+  if (i0 > sn - 1) i0 = sn - 1;
+  *fr = i0 + 1 < sn ? (pos & 255) : 0;
+  return i0;
+}
+
+/* 2x2 box average: a plane (sample step 'step', for NV12 chroma 2) to a planar half-size plane. */
+static void halve(const u8 *s, int ss, int step, int w, int h, u8 *d) {
+  const int hw = w >> 1, hh = h >> 1;
+  for (int y = 0; y < hh; y++) {
+    const u8 *a = s + 2 * y * ss, *b = a + ss;
+    u8 *o = d + y * hw;
+    for (int x = 0; x < hw; x++) {
+      const int i = 2 * x * step;
+      o[x] = (u8)((a[i] + a[i + step] + b[i] + b[i + step] + 2) >> 2);
+    }
+  }
+}
+
+/* half: two buffers of (sw / 2) * (sh / 2) * 3 / 2 bytes each, for the reductions of 2x or more. */
+EXPORT(scale_yuv)
+void scale_yuv(const u8 *sy, int sys, const u8 *su, const u8 *sv, int sus, int cstep, int sw, int sh,
+               u8 *Y, u8 *U, u8 *V, int w, int h, int codedW, int codedH, int mirror, const int *M, int *scratch,
+               u8 *half) {
+  /* Anti-alias: halve with a box filter while the reduction is 2x or more; bilinear after. */
+  const int hsz = (sw >> 1) * (sh >> 1) * 3 / 2;
+  for (int k = 0; sw >= 2 * w && sh >= 2 * h && sw >= 8 && sh >= 8; k++) {
+    u8 *d = half + (k & 1) * hsz;
+    const int nw = (sw >> 1) & ~1, nh = (sh >> 1) & ~1, ncw = nw >> 1;
+    u8 *du = d + nw * nh, *dv = du + ncw * (nh >> 1);
+    halve(sy, sys, 1, 2 * nw, 2 * nh, d);
+    halve(su, sus, cstep, nw, nh, du);
+    halve(sv, sus, cstep, nw, nh, dv);
+    sy = d; sys = nw; su = du; sv = dv; sus = ncw; cstep = 1; sw = nw; sh = nh;
+  }
+  const int cw = w >> 1, ch = h >> 1, scw = sw >> 1, sch = sh >> 1, cW = codedW >> 1;
+  int *lx = scratch, *lw = lx + w, *cx = lw + w, *cwt = cx + cw, *row = cwt + cw; /* row: 2 * w */
+  bil_cols(lx, lw, w, sw, mirror);
+  bil_cols(cx, cwt, cw, scw, mirror);
+  const int soY = M[9];
+  for (int cy = 0; cy < ch; cy++) {
+    /* The two luma rows of this chroma row, before the colour matrix. */
+    for (int r = 0; r < 2; r++) {
+      int fr;
+      const int y0 = bil_row_pos(2 * cy + r, h, sh, &fr);
+      const u8 *a = sy + y0 * sys, *b = fr ? a + sys : a;
+      int *d = row + r * w;
+      for (int x = 0; x < w; x++) {
+        const int i = lx[x], f = lw[x];
+        const int top = (a[i] << 8) + (a[i + (f ? 1 : 0)] - a[i]) * f;
+        const int bot = (b[i] << 8) + (b[i + (f ? 1 : 0)] - b[i]) * f;
+        d[x] = ((top << 8) + (bot - top) * fr + 32768) >> 16;
+      }
+    }
+    int fr;
+    const int c0 = bil_row_pos(cy, ch, sch, &fr);
+    const u8 *ua = su + c0 * sus, *va = sv + c0 * sus;
+    const u8 *ub = fr ? ua + sus : ua, *vb = fr ? va + sus : va;
+    u8 *Yd0 = Y + 2 * cy * codedW, *Yd1 = Yd0 + codedW;
+    for (int x = 0; x < cw; x++) {
+      const int i = cx[x] * cstep, f = cwt[x], n = f ? cstep : 0;
+      const int ut = (ua[i] << 8) + (ua[i + n] - ua[i]) * f, ubt = (ub[i] << 8) + (ub[i + n] - ub[i]) * f;
+      const int vt = (va[i] << 8) + (va[i + n] - va[i]) * f, vbt = (vb[i] << 8) + (vb[i + n] - vb[i]) * f;
+      const int du = (((ut << 8) + (ubt - ut) * fr + 32768) >> 16) - 128;
+      const int dv = (((vt << 8) + (vbt - vt) * fr + 32768) >> 16) - 128;
+      const int y00 = row[2 * x], y01 = row[2 * x + 1], y10 = row[w + 2 * x], y11 = row[w + 2 * x + 1];
+      const int dy = ((y00 + y01 + y10 + y11 + 2) >> 2) - soY;
+      U[cy * cW + x] = (u8)clip255(128 + ((M[3] * dy + M[4] * du + M[5] * dv + 2048) >> 12));
+      V[cy * cW + x] = (u8)clip255(128 + ((M[6] * dy + M[7] * du + M[8] * dv + 2048) >> 12));
+      const int ct = M[1] * du + M[2] * dv + 2048;
+      Yd0[2 * x] = (u8)clip255(16 + ((M[0] * (y00 - soY) + ct) >> 12));
+      Yd0[2 * x + 1] = (u8)clip255(16 + ((M[0] * (y01 - soY) + ct) >> 12));
+      Yd1[2 * x] = (u8)clip255(16 + ((M[0] * (y10 - soY) + ct) >> 12));
+      Yd1[2 * x + 1] = (u8)clip255(16 + ((M[0] * (y11 - soY) + ct) >> 12));
+    }
+  }
+  pad_coded(Y, w, h, codedW, codedH);
+  pad_coded(U, cw, ch, cW, codedH >> 1);
+  pad_coded(V, cw, ch, cW, codedH >> 1);
+}
+
 EXPORT(yuv420_to_rgba)
 void yuv420_to_rgba(const u8 *Y, const u8 *U, const u8 *V, int codedW, int w, int h, u8 *rgba) {
   const int cW = codedW >> 1;

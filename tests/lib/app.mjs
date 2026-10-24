@@ -36,12 +36,13 @@ export const run = (cmd, args) => spawnSync(cmd, args, { maxBuffer: 1 << 30 });
 
 // Start the browser and the app page. Returns helpers.
 // cameraFile: a .y4m file for the fake camera. init: an extra init script (a function). hash: added to the page URL (for example '#debug').
-export async function openApp(name, { camera = true, init = null, hash = '', cameraFile = null } = {}) {
+export async function openApp(name, { camera = true, init = null, hash = '', cameraFile = null, args: extra = [] } = {}) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(path.join(OUT_DIR, 'app.html'), buildPage('app/index.html'));
   const srv = await serve(OUT_DIR);
   const args = camera ? ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] : [];
   if (cameraFile) args.push(`--use-file-for-fake-video-capture=${cameraFile}`); // a .y4m file as the camera
+  args.push(...extra);
   const browser = await chromium.launch({ args });
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
   // Count the JavaScript callbacks (timers, frames) and the messages to the workers.
@@ -62,7 +63,7 @@ export async function openApp(name, { camera = true, init = null, hash = '', cam
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
-  page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
+  page.on('console', (m) => m.type() === 'error' && errors.push(m.text() + (/^blob:/.test(m.location().url || '') ? ' [worker]' : '')));
   const url = `http://127.0.0.1:${srv.address().port}/app.html${hash}`;
   await page.goto(url);
   let shot = 0;

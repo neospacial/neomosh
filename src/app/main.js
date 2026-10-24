@@ -33,6 +33,10 @@ const el = {
   exportGo: $('exportGo'), exportCancel: $('exportCancel'), exportShare: $('exportShare'), exportDownload: $('exportDownload'),
 };
 
+// Debug options in the address: #debug (the self-test), capture=yuv|bitmap|draw (the crop way of the
+// capture worker, D22). Example: #debug&capture=yuv
+const HASH = new URLSearchParams(location.hash.slice(1));
+
 // Display and session preferences. Kept in localStorage (a per-viewer convenience only).
 const PREF_KEY = 'neomosh.prefs';
 const S = {
@@ -808,8 +812,12 @@ function updateSettingsSheet() {
 // The browser name and version, for the info section (the capture path depends on the browser).
 function browserName() {
   const ua = navigator.userAgent;
-  const m = ua.match(/(SamsungBrowser|Firefox|FxiOS|EdgA?|OPR|CriOS|Chrome)\/(\d+)/);
-  if (m) return `${m[1]} ${m[2]}${/; wv\)/.test(ua) ? ' (WebView)' : ''}`;
+  // The first name in this list that is in the string (the others also write "Chrome/").
+  for (const [name, re] of [['Opera', /OPR\/(\d+)/], ['Samsung Internet', /SamsungBrowser\/(\d+)/], ['Edge', /EdgA?\/(\d+)/],
+    ['Firefox', /(?:Firefox|FxiOS)\/(\d+)/], ['Chrome', /(?:CriOS|Chrome)\/(\d+)/]]) {
+    const m = ua.match(re);
+    if (m) return `${name} ${m[1]}${/; wv\)/.test(ua) ? ' (WebView)' : ''}`;
+  }
   const s = ua.match(/Version\/(\d+(\.\d+)?).*Safari/);
   return s ? `Safari ${s[1]}` : ua.slice(0, 60);
 }
@@ -1046,6 +1054,7 @@ async function start(fresh) {
   }
   if (!rec) {
     rec = new Recorder({
+      captureMethod: HASH.get('capture'),
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
     });
@@ -1085,7 +1094,7 @@ el.gearBtn.addEventListener('click', () => {
 el.exportBtn.addEventListener('click', openExport);
 
 // Plan §13.3: the self-test is a hidden debug setting. Open the page with #debug to show it.
-el.debugGroup.hidden = location.hash !== '#debug';
+el.debugGroup.hidden = !HASH.has('debug');
 el.selfTest.addEventListener('click', async () => {
   if (!rec || !rec.hasFrames || (rec.state !== ST.PAUSED && rec.state !== ST.IDLE)) {
     el.selfTestOut.textContent = 'Record a video first. Then pause and run the self-test.';
@@ -1145,6 +1154,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.hidden && rec && rec.state === ST.RECORDING) rec.pause('Recording paused.');
 });
 window.addEventListener('pagehide', () => {
+  if (rec) rec.stopCaptureNow();
   if (rec && rec.state === ST.RECORDING) rec.pause();
   if (store) store.flush().catch(() => {});
 });

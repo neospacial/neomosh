@@ -7,6 +7,7 @@ import { Encoder } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
 import { coverCrop } from './geometry.js';
 import { FrameGate, SourceGaps } from './capture.js';
+import { CamYuv } from './camyuv.js';
 
 const MAX_IN_FLIGHT = 6; // R-18 (D19), the same as the main thread path
 
@@ -55,23 +56,32 @@ let cap = null;
 // Encoder worker: the port from the capture worker.
 let capPort = null;
 
+// A picture from the capture worker: RGBA, or the planes (coded size) of the 'yuv' way.
 function encodeRgba(m) {
   const t0 = performance.now();
-  const [Y, U, V] = enc.inputFromRgba(m.rgba);
+  const [Y, U, V] = m.Y ? [m.Y, m.U, m.V] : enc.inputFromRgba(m.rgba);
   const t1 = performance.now();
   const pkt = enc.encode(Y, U, V);
   const t2 = performance.now();
   self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0, capMs: m.grabMs }, [pkt.bits.buffer]);
 }
 
-// Two ways to crop and scale a camera frame. 'bitmap': createImageBitmap with resize (the GPU on
-// most phones), then read the small picture. 'draw': draw the full frame on the canvas. The fastest
-// depends on the device, so the worker measures both on the first frames and keeps the faster one.
-const CAP_WARM = 5, CAP_TRIAL = 6; // short: the slower way can lose frames during its trial
+// Three ways to crop and scale a camera frame. 'yuv': copy the camera YUV and scale it in the kernels
+// (no GPU, no canvas). 'bitmap': createImageBitmap with resize (the GPU on most phones), then read the
+// small picture. 'draw': draw the full frame on the canvas. The fastest depends on the device and the
+// browser, so the worker measures each one on the first frames and keeps the fastest.
+const CAP_WARM = 5, CAP_TRIAL = 6; // short: a slow way can lose frames during its trial
+function capCandidates() {
+  const list = [];
+  if (cap.yuv && cap.yuvOk !== false && cap.usable) list.push('yuv');
+  list.push('bitmap', 'draw');
+  return list;
+}
 function capMethod() {
   if (cap.method) return cap.method;
-  const n = cap.trial.bitmap.length + cap.trial.draw.length + cap.warm;
-  return n < CAP_WARM + CAP_TRIAL ? 'bitmap' : 'draw';
+  const list = capCandidates();
+  if (cap.warm < CAP_WARM) return list[0];
+  return list.find((m) => (cap.trial[m] || []).length < CAP_TRIAL) || list[list.length - 1];
 }
 function capTimed(method, ms) {
   if (cap.method) return;
@@ -79,12 +89,33 @@ function capTimed(method, ms) {
     cap.warm++;
     return;
   }
-  cap.trial[method].push(ms);
-  if (cap.trial.draw.length >= CAP_TRIAL) {
+  (cap.trial[method] = cap.trial[method] || []).push(ms);
+  const list = capCandidates();
+  if (list.every((m) => (cap.trial[m] || []).length >= CAP_TRIAL)) {
     const med = (a) => a.slice().sort((x, y) => x - y)[a.length >> 1];
-    cap.method = med(cap.trial.bitmap) <= med(cap.trial.draw) ? 'bitmap' : 'draw';
-    self.postMessage({ cmd: 'capMethod', method: cap.method, bitmapMs: med(cap.trial.bitmap), drawMs: med(cap.trial.draw) });
+    const times = {};
+    for (const m of list) times[m] = med(cap.trial[m]);
+    cap.method = list.reduce((a, b) => (times[b] < times[a] ? b : a));
+    self.postMessage({ cmd: 'capMethod', method: cap.method, times, calib: cap.calib });
   }
+}
+
+// One picture by the canvas ways ('bitmap' or 'draw'). Returns the RGBA pixels (visible size).
+async function canvasPicture(frame, c, mirror, method) {
+  ctx.setTransform(mirror ? -1 : 1, 0, 0, 1, mirror ? w : 0, 0);
+  let bitmap = null;
+  if (method === 'bitmap') {
+    try {
+      bitmap = await createImageBitmap(frame, c.sx, c.sy, c.sw, c.sh, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' });
+    } catch {
+      cap.method = 'draw'; // not supported: draw the frame
+    }
+  }
+  if (bitmap) {
+    ctx.drawImage(bitmap, 0, 0);
+    bitmap.close();
+  } else ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h).data;
 }
 
 // After a stop: cancel the stream when no frame came for 300 ms. Then no frame is in its queue
@@ -106,12 +137,14 @@ async function captureClip(m, run) {
   const gate = new FrameGate(m.fps);
   const gaps = new SourceGaps();
   let start = null, sent = 0, seq = m.seq, checked = false;
+  let frame = null; // the current frame; closed in 'finally' when an error stops the loop (close() twice is no error)
   try {
     for (;;) {
       const tr = performance.now();
-      const { value: frame, done } = await reader.read();
+      const r = await reader.read();
       const waited = performance.now() - tr;
-      if (done) break;
+      if (r.done) break;
+      frame = r.value;
       if (run !== cap.run) {
         frame.close(); // stopped: close the queued frames until the stream ends
         armQuietCancel(reader);
@@ -150,30 +183,48 @@ async function captureClip(m, run) {
       const tsUs = m.sessionEndUs + Math.round((t - start) * 1000);
       const t0 = performance.now();
       const c = coverCrop(fw, fh, w, h);
-      const method = capMethod();
-      ctx.setTransform(m.mirror ? -1 : 1, 0, 0, 1, m.mirror ? w : 0, 0);
-      if (method === 'bitmap') {
-        let bitmap = null;
+      cap.usable = CamYuv.usable(frame);
+      let method = capMethod();
+      if (method === 'yuv' && !(cap.yuv && cap.usable)) method = 'draw';
+      let msg, calibrated = false;
+      if (method === 'yuv') {
+        let planes = null;
         try {
-          bitmap = await createImageBitmap(frame, c.sx, c.sy, c.sw, c.sh, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' });
+          planes = await cap.yuv.convert(frame, c, m.mirror);
         } catch {
-          cap.method = 'draw'; // not supported: draw the frame
+          cap.yuvOk = false; // copyTo or the format failed: use the canvas ways
         }
-        if (bitmap) {
-          ctx.drawImage(bitmap, 0, 0);
-          bitmap.close();
-        } else ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
-      } else {
-        ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+        // The same frame by the canvas, to check the colour matrix and the range. A frame with too
+        // few unclipped areas gives no answer: try again on the next frames (10 times at most).
+        if (planes && cap.yuvOk === undefined) {
+          const rgba = await canvasPicture(frame, c, m.mirror, 'draw');
+          const d = cap.yuv.calibrate(rgba, planes);
+          const cs = frame.colorSpace;
+          const csText = `${frame.format} ${cs ? `${cs.matrix} ${cs.fullRange === null ? '' : cs.fullRange ? 'full' : 'limited'}` : ''}`;
+          calibrated = true;
+          if (d) {
+            cap.calib = `Y ${d.y.toFixed(1)}, U ${d.u.toFixed(1)}, V ${d.v.toFixed(1)}; ${csText}`;
+            cap.yuvOk = d.y < 3 && d.u < 3 && d.v < 3;
+          } else if (++cap.calibTries >= 10) {
+            // No answer: trust the colour space only when the browser gives it in full.
+            cap.yuvOk = !!(cs && cs.matrix && cs.fullRange !== null && cs.fullRange !== undefined);
+            cap.calib = `no clear frame; ${csText}`;
+          }
+          if (cap.yuvOk !== true) planes = null;
+        }
+        if (planes) msg = { cmd: 'planes', Y: planes[0], U: planes[1], V: planes[2] };
       }
+      if (!msg) msg = { cmd: 'rgba', rgba: await canvasPicture(frame, c, m.mirror, method === 'yuv' ? 'draw' : method) };
       frame.close();
-      const rgba = ctx.getImageData(0, 0, w, h).data;
-      capTimed(method, performance.now() - t0);
+      const ms = performance.now() - t0;
+      if (!calibrated && (method !== 'yuv' || msg.cmd === 'planes')) capTimed(method, ms);
       cap.inFlight++;
       sent++;
-      cap.port.postMessage({ cmd: 'rgba', rgba, tsUs, seq: seq++, grabMs: performance.now() - t0 }, [rgba.buffer]);
+      Object.assign(msg, { tsUs, seq: seq++, grabMs: ms });
+      cap.port.postMessage(msg, msg.rgba ? [msg.rgba.buffer] : [msg.Y.buffer]);
     }
   } finally {
+    if (frame) frame.close();
     clearTimeout(cap.quietTimer);
     if (cap.reader === reader) cap.reader = null;
     reader.cancel().catch(() => {});
@@ -187,7 +238,12 @@ const handlers = {
   init(m) {
     initCanvas(m.w, m.h);
     if (m.role === 'cap') {
-      cap = { port: m.port, inFlight: 0, run: 0, reader: null, method: null, warm: 0, trial: { bitmap: [], draw: [] } };
+      cap = { port: m.port, inFlight: 0, run: 0, reader: null, method: null, warm: 0, trial: {}, yuv: CamYuv.create(m.w, m.h), yuvOk: undefined, calib: '', calibTries: 0 };
+      // Debug: a forced way. 'yuv' still needs a usable frame; it does not check the colours.
+      if (['yuv', 'bitmap', 'draw'].includes(m.method)) {
+        cap.method = m.method;
+        if (m.method === 'yuv') cap.yuvOk = true;
+      }
       cap.port.onmessage = (e) => {
         if (e.data.cmd === 'ack') cap.inFlight--;
       };

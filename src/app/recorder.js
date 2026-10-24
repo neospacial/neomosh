@@ -25,7 +25,10 @@ export function makeWorker(src) {
 
 // Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
 export class Recorder {
-  constructor({ workerSrc, store, video, on }) {
+  // captureMethod: force the crop way of the capture worker ('yuv', 'bitmap', 'draw'; debug, D22).
+  constructor({ workerSrc, store, video, on, captureMethod }) {
+    this.captureMethod = ['yuv', 'bitmap', 'draw'].includes(captureMethod) ? captureMethod : null;
+    if (this.captureMethod) this.capMethod = `${this.captureMethod}, forced`;
     this.workerSrc = workerSrc;
     this.store = store;
     this.video = video;
@@ -96,7 +99,7 @@ export class Recorder {
     const ch = new MessageChannel();
     this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2 }, [ch.port2]);
     this.dec.postMessage({ cmd: 'init', role: 'dec', w, h });
-    this.cap.postMessage({ cmd: 'init', role: 'cap', w, h, port: ch.port1 }, [ch.port1]);
+    this.cap.postMessage({ cmd: 'init', role: 'cap', w, h, port: ch.port1, method: this.captureMethod }, [ch.port1]);
     await r;
   }
 
@@ -148,6 +151,13 @@ export class Recorder {
     return true;
   }
 
+  // The page goes away (pagehide): stop the camera track of the capture at once, so that no camera
+  // frame is left in a page that ends.
+  stopCaptureNow() {
+    if (this.capTrack) this.capTrack.stop();
+    if (this.cap && this.capActive) this.cap.postMessage({ cmd: 'capStop' });
+  }
+
   // Stop the capture worker clip. Resolves when it sent its last frame to the encoder.
   stopCapture() {
     if (!this.capActive) return Promise.resolve();
@@ -161,7 +171,10 @@ export class Recorder {
   onCap(m) {
     if (m.cmd === 'capDrop') this.countDrops(m.n, m.kind);
     else if (m.cmd === 'capSkip') this.camSkips += m.n;
-    else if (m.cmd === 'capMethod') this.capMethod = `${m.method}; bitmap ${m.bitmapMs.toFixed(1)} ms, draw ${m.drawMs.toFixed(1)} ms`;
+    else if (m.cmd === 'capMethod') {
+      this.capMethod = `${m.method}; ${Object.entries(m.times).map(([k, v]) => `${k} ${v.toFixed(1)} ms`).join(', ')}` +
+        (m.calib ? `; yuv check ${m.calib}` : '');
+    }
     else if (m.cmd === 'capMismatch') {
       // The frames are turned against the <video>: use the page path from now on.
       this.noCapWorker = true;
