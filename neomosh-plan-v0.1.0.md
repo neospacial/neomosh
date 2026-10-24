@@ -53,6 +53,7 @@ Main flow:
 | D16 | No reference clip for the look at this time. Default settings give a "classic" mosh. |
 | D17 | 720 size: all frame rates stay available. When the selected rate is more than the device can hold, the settings panel shows a hint (§7.1). The app does not change the rate (R-20). |
 | D18 | No `navigator.storage.persist()` request: some browsers show a permission prompt for it. The app uses best-effort storage, writes often, and warns when free storage is low (R-26). |
+| D19 | Encoder queue: a maximum of 6 frames in flight (R-18), not 2. The buffer (about 200 ms at 30 fps) absorbs short CPU load peaks from other apps without drops. It does not change the look or the file. The live mosh view can be late by up to this time during a peak. |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -362,7 +363,7 @@ PAUSED ──► REVIEW (player, history) ──► PAUSED
 
 ### 8.3 Frame drops (D10)
 
-- **R-18** The encoder may have a maximum of 2 frames in flight. When the capture is due and 2 frames are in flight, the app does not capture. It adds 1 to the drop count.
+- **R-18** The encoder may have a maximum of 6 frames in flight (D19). When the capture is due and 6 frames are in flight, the app does not capture. It adds 1 to the drop count.
 - **R-19** Only encoder drops count. A slow source (for example a camera at 15 fps in low light) is not a drop.
 - **R-20** A dropped frame makes the previous frame longer in the timeline (variable frame rate). The app does not change settings automatically, because that changes the look.
 - **R-21** Decoder preview frames may be skipped when the decoder is late. This does not change the file and is not reported.

@@ -13,7 +13,7 @@ export const ST = {
   REVIEW: 'review',
 };
 
-const MAX_IN_FLIGHT = 2; // R-18
+const MAX_IN_FLIGHT = 6; // R-18 (D19): about 200 ms of buffer at 30 fps for short CPU load peaks
 
 function makeWorker(src) {
   const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
