@@ -22,12 +22,16 @@ export const tests = [
     },
   },
   {
-    name: 'bloom: with I_PCM heal blocks, after a Mosh cut, and with a Clean cut',
+    name: 'bloom clip while paused (D24): with I_PCM heal blocks, then a cut; Mosh and Clean',
     fn() {
+      // As in the app: record, pause, bloom (a clip of its own), pause point, record (hidden I-frame).
       const sim = simulate({
         w: 128, h: 96, settings: { qp: 30, searchRange: 16, precision: 'quarter', skipBias: 20, heal: 'high' },
-        script: [{ record: 6, content: 'zoom' }, { bloom: 5 }, { pause: true }, { record: 4, content: 'square' }, { bloom: 6 }, { record: 4, content: 'noise' }],
+        script: [{ record: 6, content: 'zoom' }, { pause: true }, { bloom: 5 }, { pause: true }, { record: 4, content: 'square' },
+          { pause: true }, { bloom: 6 }, { pause: true }, { record: 4, content: 'noise' }],
       });
+      const types = sim.frames.map((f) => (f.bloom ? 'b' : f.type[0])).join('');
+      assert(types === 'ipppppbbbbbhpppbbbbbbhppp', `frame order ${types}`);
       for (const cuts of ['mosh', 'clean']) verify(`bloom_${cuts}`, sim, cuts);
     },
   },

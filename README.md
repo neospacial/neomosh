@@ -15,7 +15,7 @@ The exported file is a valid H.264 (Constrained Baseline) stream. Each conformin
 5. Touch the red button to resume. The new clip has no keyframe, so its motion moves the old picture. This is the datamosh. The mosh needs movement: if nothing moves, the old picture stays frozen.
 6. Repeat steps 4 and 5 as many times as necessary.
 
-   **Bloom**: while recording, hold the **BLOOM** button (bottom right, or the B key). Each frame then repeats the motion of the last frame again, so the picture keeps flowing and smearing in that direction. Release it to go back to the camera.
+   **Bloom**: while paused, hold the **BLOOM** button (next to the red button, or the B key). The motion at the end of the last clip repeats, so the picture keeps flowing and smearing in that direction. Release it to end the bloom: it is a clip of its own, with a pause point. The bloomed picture stays, and the next clip moshes on from it.
 
    To use a video file as the source (at the start or at any pause point), touch **FILE** and select a file. The **File** slider below the view sets the start point. The file plays at normal speed while you record, and pauses with the recording. At the end of the file, the recording pauses. Touch **FILE** again to select a different file, or **CAMERA** to go back to the camera. A file is never mirrored. The sound of the file is not recorded. If the camera is not available, the start screen offers **Use a video file**.
 7. To go back, touch the thumbnail (bottom left) while paused. The **History** sheet plays the video and shows one card for each pause point. Touch a card, then **Revert**, to delete all clips after that point and continue from it. **Start** deletes all clips. **New video** deletes the video.
