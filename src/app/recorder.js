@@ -1,6 +1,6 @@
 // Recorder (plan §8): session, capture, encoder and decoder workers, pause and resume.
 
-import { DEFAULT_SETTINGS } from '../codec/encoder.js';
+import { DEFAULT_SETTINGS, checkSettings } from '../codec/encoder.js';
 import { streamParams } from '../codec/headers.js';
 import { coverCrop } from './geometry.js';
 
@@ -15,7 +15,7 @@ export const ST = {
 
 const MAX_IN_FLIGHT = 6; // R-18 (D19): about 200 ms of buffer at 30 fps for short CPU load peaks
 
-function makeWorker(src) {
+export function makeWorker(src) {
   const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
   const wk = new Worker(url);
   URL.revokeObjectURL(url);
@@ -119,6 +119,15 @@ export class Recorder {
     } catch {
       /* not available */
     }
+  }
+
+  // Plan §7.2, R-12: the encoder settings change only while not recording. They apply to the next
+  // clip, and the next pause point stores them (R-13).
+  setSettings(s) {
+    if (this.state !== ST.IDLE && this.state !== ST.PAUSED) return false;
+    this.settings = checkSettings(s);
+    if (this.enc) this.enc.postMessage({ cmd: 'settings', settings: this.settings });
+    return true;
   }
 
   // The source <video> for the next clip (IDLE or PAUSED only).
@@ -235,6 +244,8 @@ export class Recorder {
       bits: pkt.bits, bitLen: pkt.bitLen, hdrBits: pkt.hdrBits, settings: pkt.settings,
     });
     // R-21: no preview bitmap when the decoder is late.
+    // R-26: a write failed (for example the storage is full): stop at once.
+    if (this.store.error && this.state === ST.RECORDING) this.pause();
     const preview = this.decInFlight === 0 && this.state === ST.RECORDING;
     this.decInFlight++;
     this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview });
@@ -281,6 +292,7 @@ export class Recorder {
       this.checkIdle();
     });
     if (this.state !== ST.PAUSING) return; // failed while waiting
+    if (this.store.error) return this.storageFailed();
     if (!this.frameCount) {
       this.setState(ST.IDLE);
       return;
@@ -296,11 +308,30 @@ export class Recorder {
     await this.makePoint(this.clipDrops);
   }
 
+  // The frames of the last clip could not be stored: go back to the last complete pause point.
+  async storageFailed() {
+    const n = this.points;
+    this.store.error = null;
+    this.store.pending = [];
+    if (this.on.toast) this.on.toast('The storage is full: the last clip was not saved. Export the video, or free some space.', 6000);
+    if (n === 0) return this.discard();
+    try {
+      await this.revertTo(n);
+    } catch {
+      this.setState(ST.PAUSED);
+    }
+  }
+
   // Plan §8.4 steps 4, 6, and 7: a pause point at the current end of the session.
   async makePoint(drops) {
     const snap = await this.snapshot();
     const thumb = await makeThumb(snap.bitmap);
-    await this.store.flush();
+    try {
+      await this.store.flush();
+    } catch (e) {
+      this.store.error = e;
+      return this.storageFailed();
+    }
     await this.putPoint({
       n: this.points + 1, frameIndex: this.frameCount, tsUs: this.sessionEndUs, drops, thumb,
       refY: snap.Y, refU: snap.U, refV: snap.V,

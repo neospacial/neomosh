@@ -86,6 +86,9 @@ function avc1(v) {
   // colr nclx: BT.709 primaries, transfer, and matrix; limited range (plan §6.1).
   const colr = box('colr', new Bytes().str('nclx').u16(1).u16(1).u16(1).u8(0));
   const pasp = box('pasp', new Bytes().u32(1).u32(1));
+  // v.avcc: an existing avcC record (for example from a VideoEncoder), else made from the SPS and PPS.
+  // The colour of a VideoEncoder stream is in its own SPS, so there is no colr box for it.
+  if (v.avcc) return box('avc1', b, box('avcC', v.avcc), pasp);
   return box('avc1', b, avcC(v.sps, v.pps), colr, pasp);
 }
 

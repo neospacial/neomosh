@@ -206,6 +206,11 @@ body[data-sheet="settings"] #settingsSheet,body[data-sheet="export"] #exportShee
 .seg button.active{background:var(--ios-yellow);color:#000}
 .seg button[disabled]{opacity:.35}
 .hint{margin:6px 0 8px;font-size:12px;font-weight:400;line-height:1.4;color:#8e8e93}
+.hint.warn{color:var(--ios-amber)}
+.hint[hidden],.group[hidden]{display:none}
+.slider{display:flex;align-items:center;gap:10px;flex:1 1 auto;max-width:220px}
+.slider span{min-width:28px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
+input[type=range]:disabled{opacity:.35}
 .info{font-size:12px;font-weight:400;color:#8e8e93;line-height:1.6;padding:8px 12px}
 #cutList{display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 10px}
 #cutList button{font-size:12px;font-weight:600;padding:6px 10px;border-radius:13px;background:rgba(255,255,255,.12)}

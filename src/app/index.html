@@ -96,13 +96,27 @@
     <div class="group">
       <div class="row"><span>Size</span><div class="seg" data-key="size"><button data-v="360">360</button><button data-v="480">480</button><button data-v="720">720</button></div></div>
       <div class="row"><span>Frame rate</span><div class="seg" data-key="fps"><button data-v="15">15</button><button data-v="24">24</button><button data-v="30">30</button></div></div>
+      <p class="hint warn" id="fpsHint" hidden></p>
       <p class="hint" id="lockHint">Size, frame rate, and shape lock at the first recorded frame.</p>
+    </div>
+    <div class="group" id="encGroup">
+      <div class="row"><span>Quality (QP)</span><div class="slider"><input id="qp" type="range" min="16" max="44" step="1" aria-label="Quality (QP)"><span id="qpVal"></span></div></div>
+      <div class="row"><span>Search range</span><div class="seg" data-key="searchRange"><button data-v="8">±8</button><button data-v="16">±16</button><button data-v="32">±32</button><button data-v="64">±64</button></div></div>
+      <div class="row"><span>Motion</span><div class="seg" data-key="precision"><button data-v="full">Full</button><button data-v="half">Half</button><button data-v="quarter">Quarter</button></div></div>
+      <div class="row"><span>Skip bias</span><div class="slider"><input id="skipBias" type="range" min="0" max="100" step="1" aria-label="Skip bias"><span id="skipVal"></span></div></div>
+      <div class="row"><span>Heal</span><div class="seg" data-key="heal"><button data-v="off">Off</button><button data-v="low">Low</button><button data-v="high">High</button></div></div>
+      <p class="hint" id="encHint">Changes apply to the next clip. Each clip keeps its own look.</p>
+      <div class="actions"><button id="encReset" type="button">Default look</button></div>
     </div>
     <div class="group">
       <div class="row"><span>Mosh preview</span><div class="seg" data-key="preview"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
       <div class="row"><span>Mirror front camera</span><div class="seg" data-key="mirror"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
     </div>
-    <div class="group info" id="info"></div>
+    <div class="group info"><div id="info"></div><div id="storageInfo"></div></div>
+    <div class="group" id="debugGroup" hidden>
+      <div class="actions"><button id="selfTest" type="button">Run the self-test</button></div>
+      <p class="hint" id="selfTestOut">Exports this video, decodes it with the browser decoder, and compares each frame with the neomosh decoder (plan §13.3).</p>
+    </div>
   </section>
 
   <section id="reviewSheet" class="sheet" aria-label="History">
@@ -124,7 +138,8 @@
   <section id="exportSheet" class="sheet" aria-label="Export">
     <header><h2>Export</h2><button class="done" type="button" data-close>Close</button></header>
     <div class="group">
-      <div class="row"><span>Mode</span><span class="val">Original (lossless)</span></div>
+      <div class="row"><span>Mode</span><div class="seg" id="expMode"><button data-v="original">Original</button><button data-v="upscale">Upscale</button></div></div>
+      <div class="row" id="upRow"><span id="upLbl">Upscale</span><div class="seg" id="expScale"><button data-v="sharp">Sharp</button><button data-v="smooth">Smooth</button></div></div>
       <div class="row cutsRow"><span>Cuts</span><div class="seg" id="allCuts"><button data-v="mosh">All Mosh</button><button data-v="clean">All Clean</button></div></div>
       <div id="cutList"></div>
     </div>
@@ -153,6 +168,6 @@
 const VERSION = '@VERSION@';
 const WORKER_SRC = "@WORKER:codec,app/worker.js";
 </script>
-<!--@modules:codec-main,mux/mp4.js,mux/remux.js,app/geometry.js,app/store.js,app/recorder.js,app/player.js,app/main.js-->
+<!--@modules:codec-main,mux/mp4.js,mux/remux.js,app/geometry.js,app/store.js,app/recorder.js,app/player.js,app/upscale.js,app/selftest.js,app/main.js-->
 </body>
 </html>

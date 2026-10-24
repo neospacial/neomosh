@@ -4,7 +4,7 @@ neomosh is a video recorder in one standalone HTML file. It makes a **true datam
 
 The exported file is a valid H.264 (Constrained Baseline) stream. Each conforming player shows the same moshed pictures.
 
-> Status: development. Phases 1 to 5 are done: codec, MP4 export, recorder, history, and the file source. The full settings panel comes in Phase 7. neomosh records video only (no audio). See `neomosh-plan-v0.1.0.md`.
+> Status: v0.1.0. All phases are done: codec, MP4 export, recorder, history, file source, settings, and Upscale export. neomosh records video only (no audio). See `neomosh-plan-v0.1.0.md`.
 
 ## How to use
 
@@ -19,7 +19,41 @@ The exported file is a valid H.264 (Constrained Baseline) stream. Each conformin
 7. To go back, touch the thumbnail (bottom left) while paused. The **History** sheet plays the video and shows one card for each pause point. Touch a card, then **Revert**, to delete all clips after that point and continue from it. **Start** deletes all clips. **New video** deletes the video.
 8. Touch **Export** (top right). For each cut, select **Mosh** or **Clean**. Touch **Export**, then **Save Video** (iOS) or **Download**.
 
-The gear (top left) sets the size and the frame rate before the first recording, and turns the mosh preview and the front-camera mirror on or off. An amber badge shows the count of frames that the encoder dropped. Touch it for help.
+   **Original** mode (the default) copies the recorded frames into the file. It is fast and lossless. **Upscale** mode scales the video to 1080 on the short side (**Sharp** keeps the blocks, **Smooth** blurs them) and encodes it again with the H.264 encoder of the browser. Upscale shows only when the browser has an H.264 encoder.
+
+An amber badge shows the count of frames that the encoder dropped. Touch it for help.
+
+## Settings
+
+Touch the gear (top left).
+
+| Setting | Values | Default | When it can change |
+|---|---|---|---|
+| Size (short side) | 360, 480, 720 | 480 | Before the first recorded frame |
+| Frame rate | 15, 24, 30 | 30 | Before the first recorded frame. A hint shows when the device is too slow for the rate |
+| Shape | 1:1, 4:3, 3:2, 16:9; vertical or horizontal | 4:3, from the screen | Before the first recorded frame (bar above the view) |
+| Quality (QP) | 16–44 | 28 | While paused. High = coarse blocks; low = clean detail, larger file |
+| Search range | ±8, ±16, ±32, ±64 | ±32 | While paused. Larger = longer smears with fast motion, more CPU |
+| Motion | Full, Half, Quarter | Half | While paused. Full = blocky steps; Quarter = smooth flowing smear |
+| Skip bias | 0–100 | 50 | While paused. High = more old pixels stay |
+| Heal | Off, Low, High | Off | While paused. Low and High repair bad areas (partial mosh) |
+| Mosh preview | On, Off | On | At any time. Off shows the raw source while recording |
+| Mirror front camera | On, Off | On | At any time. Applies to the next clip |
+
+The encoder settings apply to the next clip. Each clip keeps its own look. A revert also restores the settings of that pause point. **Default look** sets the encoder settings to their defaults. The info section shows the encoder time for each frame, the dropped frames, and the storage used and free.
+
+## Browser support
+
+| Browser | Status |
+|---|---|
+| Chrome (Android, desktop) | Tested. Upscale export is available |
+| Edge | Same engine as Chrome. Not tested |
+| Safari (iOS 16.4 or later, macOS) | Must work. Not tested yet (plan §13.4). Upscale export when Safari has an H.264 `VideoEncoder` |
+| Firefox 132 or later | Must work. Not tested |
+
+The browser must have WebAssembly SIMD for full speed. Without it, the codec uses JavaScript, which is approximately 10 times slower. The page makes no network requests.
+
+For a check of a device, open the page with `#debug` at the end of the address. The settings sheet then shows **Run the self-test**. It exports the video, decodes it with the decoder of the browser, and compares each frame with the neomosh decoder. The result must be "PASS. Identical".
 
 The app keeps the video in the browser storage (IndexedDB). When you open the app again, touch **Continue last video** to continue from the last pause point, or **Start new**. If the app closed during a recording, it keeps the frames that were stored (all but about the last second) and makes a new pause point.
 
@@ -46,7 +80,7 @@ The page makes no network requests. The encoder p95 time must be below the frame
 
 ### Tests
 
-The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` file, and decode them with FFmpeg. The FFmpeg output must be byte-identical to the output of our decoder (plan §13.1). The MP4 packets must have the correct times, durations, and sync flags. When Playwright is installed, a test also decodes the MP4 samples with the Chromium WebCodecs decoder and plays the files in a `<video>` element, and a test operates the built app with a fake camera: record, pause, resume, export. The mosh test (plan §13.2) makes sure that, after a cut, only the area along the motion path changes.
+The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` file, and decode them with FFmpeg. The FFmpeg output must be byte-identical to the output of our decoder (plan §13.1). The MP4 packets must have the correct times, durations, and sync flags. When Playwright is installed, a test also decodes the MP4 samples with the Chromium WebCodecs decoder and plays the files in a `<video>` element, and tests operate the built app with a fake camera: record, pause, resume, history, settings, storage full, Original and Upscale export, and the self-test. The mosh test (plan §13.2) makes sure that, after a cut, only the area along the motion path changes.
 
 ### Layout
 
@@ -67,3 +101,6 @@ The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` fil
 - The export has only one sync frame (frame 0), unless a cut is set to Clean. Players seek slowly in long files. Playback is normal.
 - At a Mosh cut, the hidden I-frame is not in the file. The frame before the cut stays on screen for that time, so the timeline has no gap.
 - I-frames use I_PCM (no compression). Their bitrate can be above the level limit. The level is selected only from the frame size and the macroblock rate.
+- A slow device drops frames. Use a smaller size, a lower frame rate, or a smaller search range.
+- No audio. The browser has no AAC encoder on all platforms, and audio made the frame drops worse (plan D20).
+- When the storage is full, the recording pauses and the last clip is not kept. Export the video, or free some space.

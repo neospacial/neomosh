@@ -2,9 +2,12 @@
 /* global VERSION, WORKER_SRC */
 
 import { remuxOriginal } from '../mux/remux.js';
+import { upscaleConfig, upscaleExport } from './upscale.js';
+import { selfTest } from './selftest.js';
 import { sessionSize, fileStamp, formatTime } from './geometry.js';
 import { Store } from './store.js';
 import { Recorder, ST } from './recorder.js';
+import { DEFAULT_SETTINGS, checkSettings } from '../codec/encoder.js';
 import { Player } from './player.js';
 
 const $ = (id) => document.getElementById(id);
@@ -22,7 +25,10 @@ const el = {
   player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
   newVideo: $('newVideo'), confirmTitle: $('confirmTitle'), confirmText: $('confirmText'),
   confirmYes: $('confirmYes'), confirmNo: $('confirmNo'),
-  sheetBack: $('sheetBack'), info: $('info'), lockHint: $('lockHint'),
+  sheetBack: $('sheetBack'), info: $('info'), lockHint: $('lockHint'), fpsHint: $('fpsHint'), storageInfo: $('storageInfo'),
+  qp: $('qp'), qpVal: $('qpVal'), skipBias: $('skipBias'), skipVal: $('skipVal'), encReset: $('encReset'),
+  debugGroup: $('debugGroup'), selfTest: $('selfTest'), selfTestOut: $('selfTestOut'),
+  expMode: $('expMode'), expScale: $('expScale'), upRow: $('upRow'), upLbl: $('upLbl'),
   cutList: $('cutList'), allCuts: $('allCuts'), progress: $('progress').firstElementChild, exportMsg: $('exportMsg'),
   exportGo: $('exportGo'), exportCancel: $('exportCancel'), exportShare: $('exportShare'), exportDownload: $('exportDownload'),
 };
@@ -39,6 +45,7 @@ const S = {
   fps: 30,
   preview: true,
   mirrorFront: true,
+  enc: { ...DEFAULT_SETTINGS }, // the encoder settings for the next video (plan §7.2)
   stream: null,
   hasVideo: false,
   multiCam: true,
@@ -55,8 +62,31 @@ try {
 }
 function savePrefs() {
   try {
-    const { aspect, size, fps, preview, mirrorFront } = S;
-    localStorage.setItem(PREF_KEY, JSON.stringify({ aspect, size, fps, preview, mirrorFront }));
+    const { aspect, size, fps, preview, mirrorFront, enc } = S;
+    localStorage.setItem(PREF_KEY, JSON.stringify({ aspect, size, fps, preview, mirrorFront, enc }));
+  } catch {
+    /* storage not available */
+  }
+}
+
+try {
+  S.enc = checkSettings(S.enc);
+} catch {
+  S.enc = { ...DEFAULT_SETTINGS }; // stored values from another version
+}
+
+// D17: the encoder speed of this device, in ms for each megapixel (measured at each pause).
+const SPEED_KEY = 'neomosh.speed';
+function loadSpeed() {
+  try {
+    return Number(localStorage.getItem(SPEED_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+function saveSpeed(msPerMp) {
+  try {
+    localStorage.setItem(SPEED_KEY, String(msPerMp));
   } catch {
     /* storage not available */
   }
@@ -413,6 +443,9 @@ function onDecoded(bitmap) {
 }
 
 function onPaused(bitmap, thumb) {
+  // D17: measure the speed of this device (only after a clip of some length).
+  if (rec && rec.session && rec.encMs && rec.clipFrames > 10) saveSpeed(rec.encMs / ((rec.session.w * rec.session.h) / 1e6));
+  checkStorage();
   // Plan §8.4 step 7, R-22: the overlay has the same size and crop as the viewfinder.
   const c = el.overlay;
   if (bitmap) {
@@ -571,7 +604,6 @@ function refreshUI() {
   el.orientBtn.disabled = locked;
   el.ratios.forEach((b) => (b.disabled = locked));
   el.exportBtn.disabled = !(rec && rec.hasFrames && idleOrPaused);
-  el.gearBtn.disabled = st === ST.RECORDING || st === ST.PAUSING;
   el.preview.classList.toggle('mirror', mirrored());
   el.body.setAttribute('data-preview', S.preview ? '1' : '0');
   updateSettingsSheet();
@@ -730,9 +762,14 @@ el.newVideo.addEventListener('click', async () => {
 });
 
 // Settings (plan §7.1 and §7.3; the encoder settings and the full Info section come in Phase 7).
+const encSettings = () => (rec ? rec.settings : S.enc);
+const canEdit = () => !rec || rec.state === ST.IDLE || rec.state === ST.PAUSED;
+
 function updateSettingsSheet() {
   const locked = sessionLocked();
-  const val = { size: S.size, fps: S.fps, preview: S.preview ? 1 : 0, mirror: S.mirrorFront ? 1 : 0 };
+  const edit = canEdit(); // R-12: while recording, the values show but do not change
+  const enc = encSettings();
+  const val = { size: S.size, fps: S.fps, preview: S.preview ? 1 : 0, mirror: S.mirrorFront ? 1 : 0, ...enc };
   if (locked) {
     val.size = Math.min(rec.session.w, rec.session.h);
     val.fps = rec.session.fps;
@@ -740,13 +777,19 @@ function updateSettingsSheet() {
   document.querySelectorAll('#settingsSheet .seg').forEach((seg) => {
     const k = seg.dataset.key;
     seg.querySelectorAll('button').forEach((b) => {
-      b.classList.toggle('active', Number(b.dataset.v) === val[k]);
-      b.disabled = (k === 'size' || k === 'fps') && locked;
+      b.classList.toggle('active', b.dataset.v === String(val[k]));
+      b.disabled = ((k === 'size' || k === 'fps') && locked) || (k in enc && !edit);
     });
   });
+  el.qp.value = enc.qp;
+  el.qpVal.textContent = enc.qp;
+  el.skipBias.value = enc.skipBias;
+  el.skipVal.textContent = enc.skipBias;
+  el.qp.disabled = el.skipBias.disabled = el.encReset.disabled = !edit;
   el.lockHint.textContent = locked
     ? 'Size and frame rate are locked for this video.'
     : 'Size, frame rate, and shape lock at the first recorded frame.';
+  updateFpsHint();
   if (rec) {
     el.info.textContent = `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
       (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '') +
@@ -756,25 +799,80 @@ function updateSettingsSheet() {
   }
 }
 
+// D17: a hint when the frame rate is more than this device can hold at this size.
+function updateFpsHint() {
+  const rate = loadSpeed();
+  const { w, h } = pictureSize();
+  const fps = sessionLocked() ? rec.session.fps : S.fps;
+  const est = (rate * w * h) / 1e6;
+  const fits = (f) => est <= 0.85 * (1000 / f);
+  if (!rate || fits(fps)) {
+    el.fpsHint.hidden = true;
+    return;
+  }
+  const lower = [24, 15].filter((f) => f < fps && fits(f));
+  el.fpsHint.textContent = `${Math.min(w, h)} at ${fps} fps can drop frames on this device (about ${est.toFixed(0)} ms for each frame). ` +
+    (lower.length ? `${lower.join(' or ')} fps is safer.` : 'A smaller size is safer.');
+  el.fpsHint.hidden = false;
+}
+
+// R-26: warn when free storage is low (at each pause).
+async function checkStorage() {
+  const e = await Store.estimate();
+  if (e && e.free < 200 * 1048576) toast(`Free storage is low: ${(e.free / 1048576).toFixed(0)} MB. Export the video soon.`, 4500);
+}
+
+// Plan §7.4: storage used and free.
+async function updateStorageInfo() {
+  const e = await Store.estimate();
+  el.storageInfo.textContent = e ? `Storage: ${(e.used / 1048576).toFixed(0)} MB used, ${(e.free / 1048576).toFixed(0)} MB free.` : '';
+}
+
+function setEnc(change) {
+  if (!canEdit()) return;
+  const next = checkSettings({ ...encSettings(), ...change });
+  if (rec) rec.setSettings(next);
+  S.enc = next;
+  savePrefs();
+  updateSettingsSheet();
+}
+
 document.querySelectorAll('#settingsSheet .seg button').forEach((b) => {
   b.addEventListener('click', () => {
     const k = b.parentElement.dataset.key;
-    const v = Number(b.dataset.v);
-    if (k === 'size' && !sessionLocked()) S.size = v;
-    if (k === 'fps' && !sessionLocked()) S.fps = v;
-    if (k === 'preview') S.preview = v === 1;
-    if (k === 'mirror') S.mirrorFront = v === 1; // a change while paused applies to the next clip
+    const v = b.dataset.v;
+    if (k === 'searchRange') return setEnc({ searchRange: Number(v) });
+    if (k === 'precision' || k === 'heal') return setEnc({ [k]: v });
+    if (k === 'size' && !sessionLocked()) S.size = Number(v);
+    if (k === 'fps' && !sessionLocked()) S.fps = Number(v);
+    if (k === 'preview') S.preview = v === '1';
+    if (k === 'mirror') S.mirrorFront = v === '1'; // a change while paused applies to the next clip
     savePrefs();
     relayout();
     refreshUI();
   });
 });
+el.qp.addEventListener('input', () => setEnc({ qp: Number(el.qp.value) }));
+el.skipBias.addEventListener('input', () => setEnc({ skipBias: Number(el.skipBias.value) }));
+el.encReset.addEventListener('click', () => setEnc({ ...DEFAULT_SETTINGS }));
 
 // Export (plan §9.1, §9.2: Original mode).
 let exportCtl = null;
 let exportBlob = null;
 let exportName = '';
 let cutModes = [];
+let expMode = 'original'; // plan §9.1
+let expSmooth = false;
+let upConfig = null; // the VideoEncoder configuration, or null: no Upscale mode (plan §9.3)
+
+function renderMode() {
+  el.expMode.parentElement.hidden = !upConfig;
+  if (!upConfig) expMode = 'original';
+  el.upRow.hidden = expMode !== 'upscale';
+  if (upConfig) el.upLbl.textContent = `${upConfig.outW}×${upConfig.outH}`;
+  el.expMode.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.v === expMode));
+  el.expScale.querySelectorAll('button').forEach((b) => b.classList.toggle('active', (b.dataset.v === 'smooth') === expSmooth));
+}
 
 function renderCuts() {
   el.cutList.textContent = '';
@@ -816,8 +914,15 @@ function openExport() {
   el.progress.style.width = '0';
   el.exportMsg.textContent = `${rec.frameCount} frames, ${rec.cuts.length} cuts.`;
   renderCuts();
+  upConfig = null;
+  renderMode();
   exportButtons('ready');
   openSheet('export');
+  const p = rec.params;
+  upscaleConfig(p.w, p.h, p.fps).then((c) => {
+    upConfig = c;
+    renderMode();
+  });
 }
 
 async function runExport() {
@@ -828,11 +933,16 @@ async function runExport() {
   const total = rec.frameCount;
   try {
     await rec.store.flush();
-    const r = await remuxOriginal(rec.params, rec.store.readFrames(rec.session.id), {
+    const opts = {
       cuts: cutModes.slice(),
+      smooth: expSmooth,
       signal: exportCtl.signal,
       onProgress: (n) => (el.progress.style.width = ((100 * n) / total).toFixed(1) + '%'),
-    });
+    };
+    const frames = rec.store.readFrames(rec.session.id);
+    const r = expMode === 'upscale' && upConfig
+      ? await upscaleExport(WORKER_SRC, rec.params, upConfig, frames, opts)
+      : await remuxOriginal(rec.params, frames, opts);
     exportBlob = new Blob(r.parts, { type: 'video/mp4' });
     exportName = `neomosh_${fileStamp()}.mp4`;
     el.exportMsg.textContent = `${exportName} · ${(exportBlob.size / 1048576).toFixed(1)} MB`;
@@ -849,6 +959,14 @@ async function runExport() {
 el.allCuts.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
   cutModes = cutModes.map(() => b.dataset.v);
   renderCuts();
+}));
+el.expMode.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+  expMode = b.dataset.v;
+  renderMode();
+}));
+el.expScale.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+  expSmooth = b.dataset.v === 'smooth';
+  renderMode();
 }));
 el.exportGo.addEventListener('click', runExport);
 el.exportCancel.addEventListener('click', () => exportCtl && exportCtl.abort());
@@ -911,6 +1029,7 @@ async function start(fresh) {
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: { state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000) },
     });
+    rec.settings = { ...S.enc };
   }
   await startStream(S.facing); // without a camera, the gate offers a video file
   if (restoreSession) {
@@ -940,9 +1059,33 @@ el.orientBtn.addEventListener('click', setOrient);
 el.slider.addEventListener('input', () => setOpacity(el.slider.value));
 el.gearBtn.addEventListener('click', () => {
   refreshUI();
+  updateStorageInfo();
   openSheet('settings');
 });
 el.exportBtn.addEventListener('click', openExport);
+
+// Plan §13.3: the self-test is a hidden debug setting. Open the page with #debug to show it.
+el.debugGroup.hidden = location.hash !== '#debug';
+el.selfTest.addEventListener('click', async () => {
+  if (!rec || !rec.hasFrames || (rec.state !== ST.PAUSED && rec.state !== ST.IDLE)) {
+    el.selfTestOut.textContent = 'Record a video first. Then pause and run the self-test.';
+    return;
+  }
+  const prev = rec.state;
+  rec.setState(ST.EXPORTING);
+  el.selfTest.disabled = true;
+  el.selfTestOut.textContent = 'Running…';
+  try {
+    await rec.store.flush();
+    const r = await selfTest(WORKER_SRC, rec.params, rec.store.readFrames(rec.session.id),
+      (n) => (el.selfTestOut.textContent = `Running… ${n} frames`));
+    el.selfTestOut.textContent = (r.ok ? 'PASS. ' : 'FAIL. ') + r.message;
+    el.selfTestOut.dataset.result = r.ok ? 'pass' : 'fail';
+  } finally {
+    el.selfTest.disabled = false;
+    rec.setState(prev);
+  }
+});
 el.sheetBack.addEventListener('click', closeSheet);
 document.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closeSheet));
 el.thumbBtn.addEventListener('click', openReview);

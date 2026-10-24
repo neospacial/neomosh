@@ -688,8 +688,9 @@ Done when: all §13.1 and §13.2 tests pass, and Ryan has run the benchmark on h
 
 ### Phase 7 — Settings and polish
 
-- Full settings panel (§7), Info section, Upscale export, AAC edit list, storage warnings, in-browser self-test, README.
+- Full settings panel (§7), Info section, Upscale export, ~~AAC edit list~~ (removed by D20), storage warnings, in-browser self-test, README.
 - Done when: all settings work in their full ranges, and §13.3 and §13.4 pass.
+- Status: done in code. Tests `phase7.test.mjs`: encoder settings at both ends of their ranges (R-12, R-13), storage full (pause, revert to the last pause point, toast), Upscale export (1080 short side, valid MP4), §13.3 self-test in Chromium (identical). §13.4 device tests: Ryan.
 
 ---
 

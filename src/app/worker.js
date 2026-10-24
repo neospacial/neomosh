@@ -41,6 +41,9 @@ function warmUp() {
   }
 }
 
+// Upscale export (plan §9.3): the decoded frames, scaled, to the H.264 VideoEncoder of the browser.
+let up = null;
+
 const handlers = {
   // { role, w, h, settings }
   init(m) {
@@ -92,17 +95,76 @@ const handlers = {
     const bitmap = dec.hasRef ? decodedBitmap() : null;
     self.postMessage({ cmd: 'snapshot', id: m.id, ...s, bitmap }, [s.Y.buffer, s.U.buffer, s.V.buffer, ...(bitmap ? [bitmap] : [])]);
   },
+  // Upscale export. { w, h, outW, outH, smooth, codec, bitrate, fps }
+  upInit(m) {
+    initCanvas(m.w, m.h);
+    dec = new Decoder(m.w, m.h);
+    const canvas2 = new OffscreenCanvas(m.outW, m.outH);
+    const ctx2 = canvas2.getContext('2d', { alpha: false });
+    ctx2.imageSmoothingEnabled = !!m.smooth; // Sharp = nearest neighbour
+    if (m.smooth) ctx2.imageSmoothingQuality = 'high';
+    const ve = new VideoEncoder({
+      output: (chunk, meta) => {
+        const data = new Uint8Array(chunk.byteLength);
+        chunk.copyTo(data);
+        const d = meta && meta.decoderConfig && meta.decoderConfig.description;
+        const desc = d ? new Uint8Array(d instanceof ArrayBuffer ? d : d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)) : null;
+        self.postMessage({ cmd: 'upChunk', data, key: chunk.type === 'key', ts: chunk.timestamp, desc }, [data.buffer]);
+      },
+      error: (e) => self.postMessage({ cmd: 'error', message: String(e && e.message ? e.message : e), during: 'upscale' }),
+    });
+    ve.configure({ codec: m.codec, width: m.outW, height: m.outH, bitrate: m.bitrate, framerate: m.fps, avc: { format: 'avc' }, latencyMode: 'realtime' });
+    up = { ve, canvas2, ctx2, outW: m.outW, outH: m.outH, lastKey: -Infinity, chain: Promise.resolve() };
+    self.postMessage({ cmd: 'ready' });
+  },
+  // { pkt, show, tsUs }: decode; when the picture changed, scale and encode it (keyframe every 2 s).
+  // The frames go through one chain, so that a frame does not start before the last one is done.
+  upFrame(m) {
+    return (up.chain = up.chain.then(() => upFrame(m)));
+  },
+  upFlush() {
+    return (up.chain = up.chain.then(async () => {
+      await up.ve.flush();
+      up.ve.close();
+      self.postMessage({ cmd: 'upDone' });
+    }));
+  },
+
+  // Self-test (plan §13.3): decode a kept frame and return the picture, cropped, as I420 planes.
+  yuv(m) {
+    dec.decodePacket(m.pkt, true);
+    const f = dec.getFrame();
+    self.postMessage({ cmd: 'yuv', seq: m.seq, ...f }, [f.y.buffer, f.u.buffer, f.v.buffer]);
+  },
+
   // R-08: set the reference picture.
   setRef(m) {
     dec.setRef(m.Y, m.U, m.V);
   },
 };
 
+async function upFrame(m) {
+  if (dec.decodePacket(m.pkt, m.show)) {
+    const bitmap = decodedBitmap();
+    up.ctx2.drawImage(bitmap, 0, 0, up.outW, up.outH);
+    bitmap.close();
+    const vf = new VideoFrame(up.canvas2, { timestamp: m.tsUs });
+    const key = m.tsUs - up.lastKey >= 2e6;
+    if (key) up.lastKey = m.tsUs;
+    up.ve.encode(vf, { keyFrame: key });
+    vf.close();
+    while (up.ve.encodeQueueSize > 2) await new Promise((r) => setTimeout(r, 2));
+  }
+  self.postMessage({ cmd: 'upAck' });
+}
+
 self.onmessage = (e) => {
   const m = e.data;
+  const fail = (err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: m.cmd });
   try {
-    handlers[m.cmd](m);
+    const r = handlers[m.cmd](m);
+    if (r && r.catch) r.catch(fail);
   } catch (err) {
-    self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: m.cmd });
+    fail(err);
   }
 };

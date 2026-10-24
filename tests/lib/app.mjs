@@ -35,7 +35,8 @@ function serve(dir) {
 export const run = (cmd, args) => spawnSync(cmd, args, { maxBuffer: 1 << 30 });
 
 // Start the browser and the app page. Returns helpers.
-export async function openApp(name, { camera = true } = {}) {
+// init: an extra init script (a function). hash: added to the page URL (for example '#debug').
+export async function openApp(name, { camera = true, init = null, hash = '' } = {}) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(path.join(OUT_DIR, 'app.html'), buildPage('app/index.html'));
   const srv = await serve(OUT_DIR);
@@ -55,11 +56,12 @@ export async function openApp(name, { camera = true } = {}) {
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (...x) { a.workerPosts++; return post.apply(this, x); };
   });
+  if (init) await ctx.addInitScript(init);
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
   page.on('console', (m) => m.type() === 'error' && errors.push(m.text()));
-  const url = `http://127.0.0.1:${srv.address().port}/app.html`;
+  const url = `http://127.0.0.1:${srv.address().port}/app.html${hash}`;
   await page.goto(url);
   let shot = 0;
   const h = {
