@@ -41,20 +41,21 @@ export class Remuxer {
     return true;
   }
 
-  // Returns { parts, size, samples } (see muxMp4). muxOpts: for tests only.
-  finish(muxOpts) {
+  // Returns { parts, size, samples } (see muxMp4). audio: an AAC track for muxMp4, or null.
+  // muxOpts: for tests only.
+  finish(muxOpts, audio = null) {
     if (!this.last) throw new Error('No frames to export');
     this.last.duration = Math.round(VIDEO_TIMESCALE / this.params.fps);
     const p = this.params;
     const r = muxMp4({
       width: p.w, height: p.h, timescale: VIDEO_TIMESCALE, sps: spsNal(p), pps: ppsNal(), samples: this.samples,
-    }, muxOpts);
+    }, muxOpts, audio);
     return { ...r, samples: this.samples };
   }
 }
 
 // Export from an (async) iterable of frames, for example a cursor over IndexedDB (R-34).
-// opts: { cuts, signal (AbortSignal), onProgress(framesRead) }.
+// opts: { cuts, signal (AbortSignal), onProgress(framesRead), audio (AAC track or null) }.
 export async function remuxOriginal(params, frames, opts = {}) {
   const rx = new Remuxer(params, opts);
   let n = 0;
@@ -64,5 +65,5 @@ export async function remuxOriginal(params, frames, opts = {}) {
     n++;
     if (opts.onProgress) opts.onProgress(n);
   }
-  return rx.finish();
+  return rx.finish(undefined, opts.audio || null);
 }

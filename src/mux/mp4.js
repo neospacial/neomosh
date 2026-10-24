@@ -129,76 +129,98 @@ function chunkOffsets(offsets, use64) {
   return fullBox(use64 ? 'co64' : 'stco', 0, 0, b);
 }
 
+function mp4a(a) {
+  const b = new Bytes().zeros(6).u16(1).zeros(8).u16(a.channels).u16(16).u16(0).u16(0).u32(a.sampleRate * 65536);
+  return box('mp4a', b, esds(a));
+}
+
+// esds (ISO/IEC 14496-1 ES_Descriptor) with the AudioSpecificConfig of the AAC stream.
+function esds(a) {
+  const desc = (tag, body) => new Bytes().u8(tag).u8(body.length).bytes(body.a || body);
+  const dsi = desc(0x05, a.asc);
+  const dcd = desc(0x04, new Bytes().u8(0x40).u8(0x15).u24(0).u32(a.bitrate || 0).u32(a.bitrate || 0).bytes(dsi.a));
+  const sl = desc(0x06, [0x02]);
+  const es = desc(0x03, new Bytes().u16(2).u8(0).bytes(dcd.a).bytes(sl.a));
+  return fullBox('esds', 0, 0, es);
+}
+
+// Split the samples of a track into chunks of about chunkDur (timescale units).
+function makeChunks(track, chunkDur) {
+  const chunks = [];
+  let cur = null, t = 0;
+  track.samples.forEach((s, i) => {
+    if (!cur) cur = { track, first: i, n: 0, bytes: 0, start: t / track.timescale, offset: 0 };
+    cur.n++;
+    cur.bytes += s.size;
+    t += s.duration;
+    if (t - cur.start * track.timescale >= chunkDur) {
+      chunks.push(cur);
+      cur = null;
+    }
+  });
+  if (cur) chunks.push(cur);
+  return chunks;
+}
+
 // Make the MP4 file.
 // video = { width, height, timescale, sps, pps, samples: [{ data: Uint8Array | Blob, size, duration, key }] }
-// opts.chunkDuration: chunk length in timescale units (default 1 s).
+// audio (optional) = { sampleRate, channels, asc, bitrate, samples: [{ data, size, duration }] }, timescale = sampleRate
+// opts.chunkDuration: chunk length in seconds (default 1). The chunks of the tracks are interleaved by time.
 // opts.forceCo64, opts.forceLargeMdat: for tests only.
 // Returns { parts, size }. parts: Uint8Array headers and the sample data, in file order.
-export function muxMp4(video, opts = {}) {
-  const samples = video.samples;
-  if (!samples.length) throw new Error('No samples');
-  const ts = video.timescale;
-  const chunkDur = opts.chunkDuration ?? ts;
-
-  // Chunks: consecutive samples, about chunkDur long.
-  const chunkSizes = [];
-  const chunkBytes = [];
-  let n = 0, dur = 0, bytes = 0;
-  for (const s of samples) {
-    n++;
-    dur += s.duration;
-    bytes += s.size;
-    if (dur >= chunkDur) {
-      chunkSizes.push(n);
-      chunkBytes.push(bytes);
-      n = dur = bytes = 0;
-    }
+export function muxMp4(video, opts = {}, audio = null) {
+  if (!video.samples.length) throw new Error('No samples');
+  const keys = [];
+  video.samples.forEach((s, i) => s.key && keys.push(i + 1));
+  if (keys[0] !== 1) throw new Error('The first sample must be a sync sample');
+  const tracks = [{ ...video, kind: 'vide', id: 1 }];
+  if (audio && audio.samples.length) tracks.push({ ...audio, timescale: audio.sampleRate, kind: 'soun', id: 2 });
+  const chunkSec = opts.chunkDuration ?? 1;
+  for (const t of tracks) {
+    t.duration = t.samples.reduce((a, s) => a + s.duration, 0);
+    t.chunks = makeChunks(t, chunkSec * t.timescale);
   }
-  if (n) {
-    chunkSizes.push(n);
-    chunkBytes.push(bytes);
-  }
+  // File order of the chunks: by start time, video first at equal times.
+  const order = tracks.flatMap((t) => t.chunks).sort((a, b) => a.start - b.start || a.track.id - b.track.id);
   let mdatPayload = 0;
-  for (const b of chunkBytes) mdatPayload += b;
+  for (const c of order) mdatPayload += c.bytes;
   const largeMdat = opts.forceLargeMdat || mdatPayload + 8 > 0xffffffff;
   const mdatHeader = largeMdat
     ? new Uint8Array([0, 0, 0, 1, 0x6d, 0x64, 0x61, 0x74, ...new Bytes().u64(mdatPayload + 16).a])
     : new Uint8Array([...new Bytes().u32(mdatPayload + 8).a, 0x6d, 0x64, 0x61, 0x74]);
-
-  const durations = samples.map((s) => s.duration);
-  const totalDur = durations.reduce((a, b) => a + b, 0);
-  const movieDur = Math.round((totalDur * MOVIE_TIMESCALE) / ts);
-  const keys = [];
-  samples.forEach((s, i) => s.key && keys.push(i + 1));
-  if (keys[0] !== 1) throw new Error('The first sample must be a sync sample');
+  const movieDur = Math.max(...tracks.map((t) => Math.round((t.duration * MOVIE_TIMESCALE) / t.timescale)));
 
   const head = ftyp();
+  const trak = (t, use64) => {
+    const isV = t.kind === 'vide';
+    const tables = [
+      fullBox('stsd', 0, 0, new Bytes().u32(1), isV ? avc1(t) : mp4a(t)),
+      stts(t.samples.map((s) => s.duration)),
+      ...(isV ? [stss(keys)] : []),
+      stsc(t.chunks.map((c) => c.n)),
+      stsz(t.samples.map((s) => s.size)),
+      chunkOffsets(t.chunks.map((c) => c.offset), use64),
+    ];
+    const media = isV ? fullBox('vmhd', 0, 1, new Bytes().zeros(8)) : fullBox('smhd', 0, 0, new Bytes().u16(0).u16(0));
+    const minf = box('minf', media, dinf(), box('stbl', ...tables));
+    const mdia = box('mdia', mdhd(t.timescale, t.duration), hdlr(t.kind, isV ? 'neomosh video' : 'neomosh audio'), minf);
+    const tdur = Math.round((t.duration * MOVIE_TIMESCALE) / t.timescale);
+    return box('trak', tkhd(t.id, tdur, isV ? t.width : 0, isV ? t.height : 0, !isV), mdia);
+  };
   const build = (use64) => {
     // The chunk offsets depend on the moov size. The moov size depends only on use64.
-    const offsets = chunkBytes.map(() => 0);
-    const make = () => {
-      const stbl = box('stbl',
-        fullBox('stsd', 0, 0, new Bytes().u32(1), avc1(video)),
-        stts(durations), stss(keys), stsc(chunkSizes), stsz(samples.map((s) => s.size)),
-        chunkOffsets(offsets, use64));
-      const minf = box('minf', fullBox('vmhd', 0, 1, new Bytes().zeros(8)), dinf(), stbl);
-      const mdia = box('mdia', mdhd(ts, totalDur), hdlr('vide', 'neomosh video'), minf);
-      const trak = box('trak', tkhd(1, movieDur, video.width, video.height, false), mdia);
-      return box('moov', mvhd(movieDur, 2), trak);
-    };
-    let moov = make();
-    let o = head.length + moov.length + mdatHeader.length;
-    for (let i = 0; i < chunkBytes.length; i++) {
-      offsets[i] = o;
-      o += chunkBytes[i];
+    const make = () => box('moov', mvhd(movieDur, tracks.length + 1), ...tracks.map((t) => trak(t, use64)));
+    let o = head.length + make().length + mdatHeader.length;
+    for (const c of order) {
+      c.offset = o;
+      o += c.bytes;
     }
-    moov = make();
-    return { moov, lastOffset: offsets[offsets.length - 1] };
+    return { moov: make(), lastOffset: order[order.length - 1].offset };
   };
   let r = build(!!opts.forceCo64);
   if (!opts.forceCo64 && r.lastOffset > 0xffffffff) r = build(true);
 
   const parts = [head, r.moov, mdatHeader];
-  for (const s of samples) parts.push(s.data);
+  for (const c of order) for (let i = c.first; i < c.first + c.n; i++) parts.push(c.track.samples[i].data);
   return { parts, size: head.length + r.moov.length + mdatHeader.length + mdatPayload };
 }

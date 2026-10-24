@@ -35,11 +35,14 @@ function serve(dir) {
 export const run = (cmd, args) => spawnSync(cmd, args, { maxBuffer: 1 << 30 });
 
 // Start the browser and the app page. Returns helpers.
-export async function openApp(name, { camera = true } = {}) {
+// opts.camera: a fake camera and microphone. opts.aac: { frame, asc } for the AAC stand-in (aacShim).
+export async function openApp(name, { camera = true, aac = null } = {}) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(path.join(OUT_DIR, 'app.html'), buildPage('app/index.html'));
   const srv = await serve(OUT_DIR);
-  const browser = await chromium.launch({ args: camera ? ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] : [] });
+  const args = ['--autoplay-policy=no-user-gesture-required'];
+  if (camera) args.push('--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream');
+  const browser = await chromium.launch({ args });
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
   // Count the JavaScript callbacks (timers, frames) and the messages to the workers.
   await ctx.addInitScript(() => {
@@ -52,9 +55,21 @@ export async function openApp(name, { camera = true } = {}) {
     window.requestAnimationFrame = (fn) => raf(wrap(fn, 'frames'));
     const rvfc = HTMLVideoElement.prototype.requestVideoFrameCallback;
     if (rvfc) HTMLVideoElement.prototype.requestVideoFrameCallback = function (fn) { return rvfc.call(this, wrap(fn, 'frames')); };
+    // Keep the AudioContexts, so that a test can check their state.
+    window.__audioContexts = [];
+    const AC = window.AudioContext;
+    if (AC) {
+      window.AudioContext = class extends AC {
+        constructor(...x) {
+          super(...x);
+          window.__audioContexts.push(this);
+        }
+      };
+    }
     const post = Worker.prototype.postMessage;
     Worker.prototype.postMessage = function (...x) { a.workerPosts++; return post.apply(this, x); };
   });
+  if (aac) await ctx.addInitScript(aacShim, { frame: Array.from(aac.frame), asc: Array.from(aac.asc) });
   const page = await ctx.newPage();
   const errors = [];
   page.on('pageerror', (e) => errors.push(e.message));
@@ -127,8 +142,8 @@ export async function openApp(name, { camera = true } = {}) {
 export function checkMp4(mp4, w, h) {
   const c2 = run('ffmpeg', ['-hide_banner', '-v', 'warning', '-i', mp4, '-fps_mode', 'passthrough', '-enc_time_base:v', 'demux', '-f', 'null', '-']);
   assert(c2.status === 0 && c2.stderr.toString().trim() === '', `ffmpeg: ${c2.stderr}`);
-  const types = run('ffprobe', ['-v', 'error', '-show_entries', 'frame=pict_type', '-of', 'csv=p=0', mp4]).stdout.toString().trim().split('\n');
-  const yuv = run('ffmpeg', ['-v', 'error', '-i', mp4, '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-']).stdout;
+  const types = run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=pict_type', '-of', 'csv=p=0', mp4]).stdout.toString().trim().split('\n');
+  const yuv = run('ffmpeg', ['-v', 'error', '-i', mp4, '-map', '0:v', '-fps_mode', 'passthrough', '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-']).stdout;
   const fsz = (w * h * 3) / 2;
   assert(yuv.length === fsz * types.length, 'decoded size');
   return { types, frame: (i) => yuv.subarray(i * fsz, (i + 1) * fsz), count: types.length, yuv, fsz };
@@ -152,3 +167,43 @@ export function samePixels(a, b, what) {
   assert(maxDiff(a.data, b.data) === 0, `${what}: pixels differ`);
 }
 
+
+// A stand-in for AudioEncoder (this Chromium has no AAC encoder). It keeps the PCM that the app
+// gives it (window.__aac) and gives one real silent AAC frame for each 1024 samples, so that the
+// exported file is valid. Runs in the page.
+export function aacShim({ frame, asc }) {
+  const FRAME = new Uint8Array(frame);
+  window.AudioEncoder = class {
+    static async isConfigSupported(c) {
+      return { supported: c.codec === 'mp4a.40.2', config: c };
+    }
+    constructor({ output, error }) {
+      this.output = output;
+      this.error = error;
+      this.encodeQueueSize = 0;
+      this.total = 0;
+      this.emitted = 0;
+    }
+    configure(c) {
+      this.c = c;
+      window.__aac = { sampleRate: c.sampleRate, chunks: [] };
+    }
+    encode(data) {
+      const pcm = new Int16Array(data.numberOfFrames * 2);
+      data.copyTo(pcm, { planeIndex: 0 });
+      window.__aac.chunks.push({ ts: data.timestamp, frames: data.numberOfFrames, pcm: Array.from(pcm) });
+      this.total += data.numberOfFrames;
+      while ((this.emitted + 1) * 1024 <= this.total) this.emit();
+    }
+    emit() {
+      const meta = this.emitted ? undefined : { decoderConfig: { codec: 'mp4a.40.2', sampleRate: this.c.sampleRate, numberOfChannels: 2, description: new Uint8Array(asc) } };
+      const ts = Math.round((this.emitted * 1024 * 1e6) / this.c.sampleRate);
+      this.output(new EncodedAudioChunk({ type: 'key', timestamp: ts, data: FRAME }), meta);
+      this.emitted++;
+    }
+    async flush() {
+      if (this.emitted * 1024 < this.total) this.emit();
+    }
+    close() {}
+  };
+}
