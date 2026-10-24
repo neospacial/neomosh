@@ -1,6 +1,6 @@
 // R-14, R-19: the frame gate keeps the correct count of source frames, with camera jitter.
 
-import { FrameGate } from '../src/app/capture.js';
+import { FrameGate, SourceGaps } from '../src/app/capture.js';
 import path from 'node:path';
 import { assert, OUT_DIR } from './lib/session.mjs';
 import { chromium, openApp, run } from './lib/app.mjs';
@@ -25,6 +25,29 @@ function simulate(srcFps, fps, jitter, n = 3000, skipEvery = 0) {
 }
 
 export const tests = [
+  {
+    name: 'source gaps: missed frames are counted; a slow or jittery source is not',
+    fn() {
+      let s = 3;
+      const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+      const count = (fps, n, skip, jitter = 2) => {
+        const g = new SourceGaps();
+        let missed = 0;
+        for (let i = 0; i < n; i++) {
+          if (skip(i)) continue;
+          missed += g.next((i * 1000) / fps + (rnd() * 2 - 1) * jitter);
+        }
+        return missed;
+      };
+      assert(count(30, 900, () => false) === 0, 'jitter only');
+      assert(count(15, 900, () => false) === 0, 'slow source');
+      assert(count(30, 900, (i) => i % 20 === 19) === 44, `each 20th missed: ${count(30, 900, (i) => i % 20 === 19)}`);
+      assert(count(30, 900, (i) => i >= 300 && i < 303) === 3, 'a gap of 3 frames');
+      // The camera changes from 30 to 15 fps (low light): only a few frames count while it adapts.
+      const change = count(30, 900, (i) => i >= 450 && i % 2 === 1);
+      assert(change <= 10, `rate change: ${change}`);
+    },
+  },
   {
     name: 'frame gate: jitter loses no frames, and the output rate is the target rate',
     fn() {

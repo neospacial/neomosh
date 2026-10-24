@@ -51,7 +51,7 @@ export class Recorder {
     this.decInFlight = 0;
     this.drops = 0;
     this.clipDrops = 0;
-    this.dropKinds = { enc: 0, page: 0 }; // R-19: encoder busy, or source frames the page did not see
+    this.dropKinds = { enc: 0, page: 0, cap: 0 }; // R-19: encoder busy; source frames that the page or the capture worker did not get
     this.seq = 0;
     this.encMs = 0; // average time in the encoder worker for each frame
     this.grabMs = 0; // the part for drawing, reading the pixels, and RGB to YUV
@@ -113,6 +113,9 @@ export class Recorder {
   startCapture() {
     const stream = this.video.srcObject;
     const track = this.source === 'camera' && !this.noCapWorker && this.cap && stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    // The reason for the page path, for the info section.
+    if (this.source !== 'camera') this.capReason = 'file source';
+    else if (!this.noCapWorker) this.capReason = !track ? 'no camera track' : track.readyState !== 'live' ? 'camera track ended' : '';
     if (!track || track.readyState !== 'live') return false;
     const base = {
       cmd: 'capStart', fps: this.params.fps, mirror: this.mirror, sessionEndUs: this.sessionEndUs, seq: this.seq,
@@ -122,7 +125,7 @@ export class Recorder {
     try {
       if (typeof MediaStreamTrackProcessor === 'function') {
         // Chrome: the processor on the main thread, the stream to the worker.
-        const readable = new MediaStreamTrackProcessor({ track: clone }).readable;
+        const readable = new MediaStreamTrackProcessor({ track: clone, maxBufferSize: 4 }).readable;
         this.cap.postMessage({ ...base, readable }, [readable]);
         this.capTrack = clone;
       } else if (this.capMstp) {
@@ -131,11 +134,13 @@ export class Recorder {
         this.capTrack = null;
       } else {
         clone.stop();
+        this.capReason = 'no MediaStreamTrackProcessor';
         return false;
       }
-    } catch {
+    } catch (e) {
       clone.stop();
       this.noCapWorker = true;
+      this.capReason = `transfer failed: ${e && e.message}`;
       return false;
     }
     this.capActive = true;
@@ -154,10 +159,12 @@ export class Recorder {
   }
 
   onCap(m) {
-    if (m.cmd === 'capDrop') this.countDrops(1, 'enc');
+    if (m.cmd === 'capDrop') this.countDrops(m.n, m.kind);
     else if (m.cmd === 'capMismatch') {
       // The frames are turned against the <video>: use the page path from now on.
       this.noCapWorker = true;
+      this.captureMode = 'page';
+      this.capReason = `frames ${m.fw}×${m.fh} (coded ${m.cw}×${m.ch}, rotation ${m.rotation}), view ${this.video.videoWidth}×${this.video.videoHeight}`;
     } else if (m.cmd === 'capStopped') {
       // The packets of these frames decrement encInFlight (it can be below 0 until now).
       this.encInFlight += m.sent;
@@ -227,7 +234,7 @@ export class Recorder {
     this.clip++;
     this.clipFrames = 0;
     this.clipDrops = 0;
-    this.dropKinds = { enc: 0, page: 0 };
+    this.dropKinds = { enc: 0, page: 0, cap: 0 };
     this.clipStartFrameTime = null;
     this.gate = null;
     this.lastPresented = null;
