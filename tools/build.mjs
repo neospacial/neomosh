@@ -6,6 +6,7 @@
 // HTML templates use these markers:
 //   <!--@css:path-->      inline a stylesheet
 //   <!--@js:path-->       inline a classic script
+//   <!--@modules:a,b-->   inline ES modules (paths from src/), bundled into one classic script
 //   "@WORKER:a.js,b.js"   a JSON string with the bundled modules (for a Blob URL worker).
 //                         The name "codec" means all CODEC_MODULES.
 //   @VERSION@             the version from package.json
@@ -21,7 +22,8 @@ export const VERSION = JSON.parse(fs.readFileSync(path.join(root, 'package.json'
 // Codec modules in dependency order.
 export const CODEC_MODULES = [
   'codec/bitio.js', 'codec/tables.js', 'codec/transform.js', 'codec/inter.js', 'codec/mvpred.js',
-  'codec/cavlc.js', 'codec/headers.js', 'codec/color.js', 'codec/decoder.js', 'codec/encoder.js',
+  'codec/cavlc.js', 'codec/headers.js', 'codec/color.js', 'codec/wasm-bytes.js', 'codec/wasm.js',
+  'codec/decoder.js', 'codec/encoder.js',
 ];
 
 const IMPORT_RE = /^import\s[\s\S]*?from\s+['"][^'"]+['"];?[ \t]*$/gm;
@@ -46,13 +48,21 @@ export function bundle(files) {
 }
 
 const safeScript = (s) => s.replace(/<\/script/gi, '<\\/script');
+// "codec": all CODEC_MODULES. "codec-main": the same without the WebAssembly module (main page).
+const moduleList = (list) => list.split(',').flatMap((s) => {
+  const t = s.trim();
+  if (t === 'codec') return CODEC_MODULES;
+  if (t === 'codec-main') return CODEC_MODULES.map((m) => (m === 'codec/wasm-bytes.js' ? 'codec/wasm-none.js' : m));
+  return [t];
+});
 
 export function buildPage(template) {
   const dir = path.join(src, path.dirname(template));
   let html = fs.readFileSync(path.join(src, template), 'utf8');
   html = html.replace(/<!--@css:([^>]+?)-->/g, (m, f) => `<style>\n${fs.readFileSync(path.join(dir, f), 'utf8')}</style>`);
   html = html.replace(/<!--@js:([^>]+?)-->/g, (m, f) => `<script>\n${safeScript(fs.readFileSync(path.join(dir, f), 'utf8'))}</script>`);
-  html = html.replace(/"@WORKER:([^"]+)"/g, (m, list) => safeScript(JSON.stringify(bundle(list.split(',').flatMap((s) => (s.trim() === 'codec' ? CODEC_MODULES : [s.trim()]))))));
+  html = html.replace(/<!--@modules:([^>]+?)-->/g, (m, list) => `<script>\n'use strict';\n${safeScript(bundle(moduleList(list)))}</script>`);
+  html = html.replace(/"@WORKER:([^"]+)"/g, (m, list) => safeScript(JSON.stringify(bundle(moduleList(list)))));
   return html.replace(/@VERSION@/g, VERSION);
 }
 

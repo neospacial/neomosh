@@ -6,10 +6,19 @@
 import { BitReader } from './bitio.js';
 import { ZIGZAG4x4, CBP_INTER_FROM_CODE } from './tables.js';
 import { readResidualBlock } from './cavlc.js';
-import { makeRef, buildRef, predLuma, predChroma } from './inter.js';
-import { makeMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
+import { makeRef, allocRef, buildRef, predLuma, predChroma } from './inter.js';
+import { yuv420ToRgba } from './color.js';
+import { Kernels } from './wasm.js';
+import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
 import { MbResidual, reconInterMB } from './transform.js';
 import { align16, parseNal } from './headers.js';
+
+// The error codes of kernels.c decode_slice.
+const DECODE_ERRORS = [
+  '', 'mb_skip_run too large', 'Macroblock type is not supported', 'Bits left after the last macroblock',
+  'pcm_alignment_zero_bit is not zero', 'Motion vector out of range', 'coded_block_pattern out of range',
+  'mb_qp_delta out of range', 'CAVLC: invalid code', 'BitReader: read past end',
+];
 
 export class Decoder {
   // w, h: visible size.
@@ -21,15 +30,33 @@ export class Decoder {
     this.mbW = this.codedW >> 4;
     this.mbH = this.codedH >> 4;
     this.numMbs = this.mbW * this.mbH;
-    this.Y = new Uint8Array(this.codedW * this.codedH);
-    this.U = new Uint8Array((this.codedW * this.codedH) >> 2);
-    this.V = new Uint8Array((this.codedW * this.codedH) >> 2);
-    this.ref = makeRef(this.codedW, this.codedH);
-    this.info = makeMbInfo(this.numMbs);
-    this.res = new MbResidual();
-    this.predY = new Uint8Array(256);
-    this.predU = new Uint8Array(64);
-    this.predV = new Uint8Array(64);
+    const n = this.codedW * this.codedH, cn = n >> 2;
+    // D21: the planes and buffers are in the memory of the WebAssembly kernels when available.
+    const k = Kernels.create();
+    this.k = k;
+    if (k) {
+      this.bitCap = this.numMbs * 1600 + 4096;
+      const p = {
+        pic: k.alloc(n + 2 * cn), pred: k.alloc(384), res: k.alloc(417 * 4), rgba: k.alloc(w * h * 4), bits: k.alloc(this.bitCap),
+      };
+      const mkRef = allocRef(k, this.codedW, this.codedH);
+      const mkInfo = allocMbInfo(k, this.numMbs, this.mbW, this.mbH);
+      k.seal();
+      this.ref = mkRef();
+      this.info = mkInfo();
+      this.bitBuf = k.u8(p.bits, this.bitCap);
+      [this.Y, this.U, this.V] = [k.u8(p.pic, n), k.u8(p.pic + n, cn), k.u8(p.pic + n + cn, cn)];
+      [this.predY, this.predU, this.predV] = [k.u8(p.pred, 256), k.u8(p.pred + 256, 64), k.u8(p.pred + 320, 64)];
+      this.res = new MbResidual(k, p.res);
+      this.rgba = k.u8(p.rgba, w * h * 4);
+    } else {
+      [this.Y, this.U, this.V] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
+      this.ref = makeRef(this.codedW, this.codedH);
+      [this.predY, this.predU, this.predV] = [new Uint8Array(256), new Uint8Array(64), new Uint8Array(64)];
+      this.res = new MbResidual();
+      this.rgba = new Uint8Array(w * h * 4);
+      this.info = makeMbInfo(this.numMbs);
+    }
     this.coef = new Int32Array(16);
     this.mv = new Int32Array(2);
     this.hasRef = false;
@@ -55,6 +82,18 @@ export class Decoder {
 
   decodeSliceData(br, intra, sliceQp) {
     if (!intra && !this.hasRef) throw new Error('P picture without a reference picture');
+    const nBytes = (br.len + 7) >> 3;
+    if (this.k && nBytes <= this.bitCap) {
+      // The whole slice in the kernels (kernels.c decode_slice, the same steps as below).
+      this.bitBuf.set(br.buf.subarray(0, nBytes));
+      const err = this.k.x.decode_slice(this.bitBuf.byteOffset, br.pos, br.len, br.alignBase, intra ? 1 : 0, sliceQp,
+        this.ref.R, this.info.I, this.Y.byteOffset, this.U.byteOffset, this.V.byteOffset, this.codedW,
+        this.predY.byteOffset, this.res.ptr);
+      if (err) throw new Error(DECODE_ERRORS[err] || `Decode error ${err}`);
+      buildRef(this.ref, this.Y, this.U, this.V);
+      this.hasRef = true;
+      return;
+    }
     const n = this.numMbs;
     let qp = sliceQp;
     let addr = 0;
@@ -90,6 +129,11 @@ export class Decoder {
     this.predict(mbx, mby, mv[0], mv[1]);
     const W = this.codedW, cW = W >> 1;
     const yOff = mby * 16 * W + mbx * 16, cOff = mby * 8 * cW + mbx * 8;
+    if (this.k) {
+      this.k.x.copy_pred(this.predY.byteOffset, this.predU.byteOffset, this.predV.byteOffset,
+        this.Y.byteOffset + yOff, W, this.U.byteOffset + cOff, this.V.byteOffset + cOff, cW);
+      return;
+    }
     for (let y = 0; y < 16; y++) this.Y.set(this.predY.subarray(y * 16, y * 16 + 16), yOff + y * W);
     for (let y = 0; y < 8; y++) {
       this.U.set(this.predU.subarray(y * 8, y * 8 + 8), cOff + y * cW);
@@ -183,6 +227,14 @@ export class Decoder {
     reconInterMB(res, qp, this.predY, this.predU, this.predV,
       this.Y, mby * 16 * W + mbx * 16, W, this.U, this.V, mby * 8 * cW + mbx * 8, cW);
     return qp;
+  }
+
+  // The current picture as RGBA (visible size). The array is reused by the next call.
+  toRgba() {
+    if (this.k) {
+      this.k.x.yuv420_to_rgba(this.Y.byteOffset, this.U.byteOffset, this.V.byteOffset, this.codedW, this.w, this.h, this.rgba.byteOffset);
+    } else yuv420ToRgba(this.Y, this.U, this.V, this.codedW, this.w, this.h, this.rgba);
+    return this.rgba;
   }
 
   // The current picture, cropped to the visible size (new arrays).

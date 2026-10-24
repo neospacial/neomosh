@@ -119,16 +119,27 @@ export function dequantChromaDC(c, qpc, out) {
 //   cb, cr: 4 blocks x 16 levels (AC; index 0 is not used).
 //   nzLuma[16], nzCb[4], nzCr[4]: TotalCoeff of each block (for nC).
 export class MbResidual {
-  constructor() {
-    this.luma = new Int32Array(256);
-    this.cb = new Int32Array(64);
-    this.cr = new Int32Array(64);
-    this.cbDC = new Int32Array(4);
-    this.crDC = new Int32Array(4);
-    this.nzLuma = new Uint8Array(16);
-    this.nzCb = new Uint8Array(4);
-    this.nzCr = new Uint8Array(4);
-    this.cbp = 0;
+  // k, ptr: in the memory of the WebAssembly kernels (wasm.js, kernels.c layout: 417 int32), else
+  // JavaScript arrays.
+  constructor(k = null, ptr = 0) {
+    const a = k ? k.i32(ptr, 417) : new Int32Array(417);
+    this.k = k;
+    this.ptr = ptr;
+    this.all = a;
+    this.luma = a.subarray(0, 256);
+    this.cb = a.subarray(256, 320);
+    this.cr = a.subarray(320, 384);
+    this.cbDC = a.subarray(384, 388);
+    this.crDC = a.subarray(388, 392);
+    this.nzLuma = a.subarray(392, 408);
+    this.nzCb = a.subarray(408, 412);
+    this.nzCr = a.subarray(412, 416);
+  }
+  get cbp() {
+    return this.all[416];
+  }
+  set cbp(v) {
+    this.all[416] = v;
   }
   clear() {
     this.luma.fill(0);
@@ -149,6 +160,11 @@ const dcOut = new Int32Array(4);
 // Reconstruct one inter macroblock: prediction + residual (R-11).
 // predY: 16x16 (stride 16), predU/predV: 8x8 (stride 8). Writes to the frame planes.
 export function reconInterMB(res, qp, predY, predU, predV, Y, yOff, yStride, U, V, cOff, cStride) {
+  if (res.k && res.k.has(predY) && res.k.has(Y)) {
+    res.k.x.recon_inter(res.ptr, qp, predY.byteOffset, predU.byteOffset, predV.byteOffset,
+      Y.byteOffset + yOff, yStride, U.byteOffset + cOff, V.byteOffset + cOff, cStride);
+    return;
+  }
   const cbp = res.cbp;
   for (let b = 0; b < 16; b++) {
     const bx = b & 3, by = b >> 2;

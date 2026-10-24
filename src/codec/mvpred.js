@@ -17,6 +17,24 @@ export function makeMbInfo(numMbs) {
   };
 }
 
+// The same state in the memory of the WebAssembly kernels (wasm.js). Reserve now; call the returned
+// function after k.seal(). The object also has the address I of the descriptor for kernels.c.
+export function allocMbInfo(k, numMbs, mbW, mbH) {
+  const p = { type: k.alloc(numMbs), mv: k.alloc(numMbs * 4), nz: k.alloc(numMbs * 24), I: k.alloc(32) };
+  return () => {
+    k.i32(p.I, 8).set([p.type, p.mv, p.mv + numMbs * 2, p.nz, p.nz + numMbs * 16, p.nz + numMbs * 20, mbW, mbH]);
+    return {
+      type: k.u8(p.type, numMbs),
+      mvx: new Int16Array(k.mem.buffer, p.mv, numMbs),
+      mvy: new Int16Array(k.mem.buffer, p.mv + numMbs * 2, numMbs),
+      nzLuma: k.u8(p.nz, numMbs * 16),
+      nzCb: k.u8(p.nz + numMbs * 16, numMbs * 4),
+      nzCr: k.u8(p.nz + numMbs * 20, numMbs * 4),
+      I: p.I,
+    };
+  };
+}
+
 const nb = new Int32Array(9); // refA, mvA.x, mvA.y, refB, ..., refC, ...
 
 function loadNeighbor(info, addr, avail, k) {

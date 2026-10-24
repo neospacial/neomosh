@@ -1,5 +1,5 @@
 // Benchmark worker (R-06: the codec runs in a worker, not on the main thread).
-import { BENCH_SIZES, BENCH_PRESETS, benchCase, formatResults, verdict } from './bench-core.js';
+import { BENCH_SIZES, BENCH_PRESETS, benchCase, formatResults, verdict, usesWasm } from './bench-core.js';
 
 self.onmessage = (e) => {
   const frames = e.data.frames || 30;
@@ -13,7 +13,7 @@ self.onmessage = (e) => {
         self.postMessage({ type: 'result', r, verdict: verdict(r), total: BENCH_SIZES.length * BENCH_PRESETS.length });
       }
     }
-    self.postMessage({ type: 'done', text: formatResults(results) });
+    self.postMessage({ type: 'done', text: formatResults(results, `codec: ${usesWasm() ? 'WebAssembly SIMD' : 'JavaScript (no WebAssembly SIMD)'}`) });
   } catch (err) {
     self.postMessage({ type: 'error', message: String(err && err.stack ? err.stack : err) });
   }
