@@ -51,6 +51,7 @@ Main flow:
 | D14 | Undo with full history. The user can go back to **any** pause point, not only one step. |
 | D15 | Video file source: at the start or at any pause point. The encoder does not know the source. |
 | D16 | No reference clip for the look at this time. Default settings give a "classic" mosh. |
+| D17 | 720 size: all frame rates stay available. When the selected rate is more than the device can hold, the settings panel shows a hint (§7.1). The app does not change the rate (R-20). |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -297,7 +298,9 @@ Settings panel: open with the gear (top left). Values outside these ranges are n
 | Aspect ratio | 1:1, 4:3, 3:2, 16:9 | 4:3 | Ratio bar, as in neocamera |
 | Orientation | Vertical, Horizontal | from screen | Ratio bar button |
 | Size (short side) | 360, 480, 720 | 480 | 720 is for fast devices |
-| Frame rate | 15, 24, 30 | 30 | Target rate |
+| Frame rate | 15, 24, 30 | 30 | Target rate. Hint at 720 (D17) |
+
+Frame-rate hint (D17): with size 720, the settings panel shows a small hint under the frame rate when the rate is more than the device can hold. Example text: "720 at 30 fps can drop frames on this device. 24 or 15 fps is safer." The hint does not block the selection. Phase 1 benchmark on Ryan's phone (Android, 8 cores): 30 fps at all 360 and 480 sizes; 960×720 24 fps (Fast, Default) or 15 fps (Max); 1280×720 15 fps.
 
 Visible sizes (horizontal; swap for vertical): 360 → 360×360, 480×360, 540×360, 640×360. 480 → 480×480, 640×480, 720×480, 852×480. 720 → 720×720, 960×720, 1080×720, 1280×720.
 
