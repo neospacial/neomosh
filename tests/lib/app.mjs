@@ -35,12 +35,14 @@ function serve(dir) {
 export const run = (cmd, args) => spawnSync(cmd, args, { maxBuffer: 1 << 30 });
 
 // Start the browser and the app page. Returns helpers.
-// init: an extra init script (a function). hash: added to the page URL (for example '#debug').
-export async function openApp(name, { camera = true, init = null, hash = '' } = {}) {
+// cameraFile: a .y4m file for the fake camera. init: an extra init script (a function). hash: added to the page URL (for example '#debug').
+export async function openApp(name, { camera = true, init = null, hash = '', cameraFile = null } = {}) {
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.writeFileSync(path.join(OUT_DIR, 'app.html'), buildPage('app/index.html'));
   const srv = await serve(OUT_DIR);
-  const browser = await chromium.launch({ args: camera ? ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] : [] });
+  const args = camera ? ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] : [];
+  if (cameraFile) args.push(`--use-file-for-fake-video-capture=${cameraFile}`); // a .y4m file as the camera
+  const browser = await chromium.launch({ args });
   const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, acceptDownloads: true });
   // Count the JavaScript callbacks (timers, frames) and the messages to the workers.
   await ctx.addInitScript(() => {

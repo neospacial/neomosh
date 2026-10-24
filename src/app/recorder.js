@@ -22,6 +22,28 @@ export function makeWorker(src) {
   return wk;
 }
 
+// R-14: select the source frames for the target frame rate. The timeline has one slot each
+// 1000/fps ms. A frame is kept when it is not more than half a slot before its slot, so camera
+// jitter does not lose frames, and a 30 fps source at 24 fps gives 24 fps.
+// next(t, missed) -> { keep, lost }. missed: source frames that the frame callback did not see.
+// lost: empty slots because of those frames (R-19). A slow source alone gives no lost slots.
+export class FrameGate {
+  constructor(fps) {
+    this.period = 1000 / fps;
+    this.due = null;
+  }
+
+  next(t, missed = 0) {
+    const period = this.period;
+    if (this.due === null) this.due = t;
+    if (t < this.due - period / 2) return { keep: false, lost: 0 }; // before its slot
+    const lost = missed > 0 ? Math.min(missed, Math.max(0, Math.floor((t - this.due) / period + 0.5))) : 0;
+    // After a gap, the timeline starts again from this frame (no burst of frames to catch up).
+    this.due = Math.max(this.due + period, t + period / 2);
+    return { keep: true, lost };
+  }
+}
+
 // Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
 export class Recorder {
   constructor({ workerSrc, store, video, on }) {
@@ -147,7 +169,8 @@ export class Recorder {
     this.clipFrames = 0;
     this.clipDrops = 0;
     this.clipStartFrameTime = null;
-    this.lastCapture = -1e9;
+    this.gate = null;
+    this.lastPresented = null;
     this.chain = Promise.resolve();
     this.setState(ST.RECORDING);
     this.lockScreen();
@@ -166,21 +189,28 @@ export class Recorder {
       let t;
       if (this.source === 'file') t = (meta ? meta.mediaTime : v.currentTime) * 1000;
       else t = meta ? meta.captureTime ?? meta.expectedDisplayTime ?? now : performance.now();
-      this.capture(t);
+      // R-19: source frames that the browser did not give to this callback (the main thread was late).
+      let missed = 0;
+      if (meta && meta.presentedFrames !== undefined) {
+        if (this.lastPresented !== null) missed = Math.max(0, meta.presentedFrames - this.lastPresented - 1);
+        this.lastPresented = meta.presentedFrames;
+      }
+      this.capture(t, missed);
     };
     if (useVfc) v.requestVideoFrameCallback(tick);
     else requestAnimationFrame(tick);
   }
 
-  capture(t) {
+  // missed: source frames that the frame callback did not see (R-19).
+  capture(t, missed = 0) {
     const p = this.params;
-    if (t - this.lastCapture < 1000 / p.fps - 2) return;
-    this.lastCapture = t;
+    if (!this.gate) this.gate = new FrameGate(p.fps);
+    const g = this.gate.next(t, missed);
+    if (g.lost > 0) this.countDrops(g.lost);
+    if (!g.keep) return;
     if (this.encInFlight >= MAX_IN_FLIGHT) {
       // R-18, R-19: an encoder drop. The previous frame becomes longer (R-20).
-      this.drops++;
-      this.clipDrops++;
-      if (this.on.drop) this.on.drop(this.drops);
+      this.countDrops(1);
       return;
     }
     const v = this.video;
@@ -199,6 +229,12 @@ export class Recorder {
       this.encInFlight--;
       this.fail(`Capture failed: ${err && err.message}`);
     });
+  }
+
+  countDrops(n) {
+    this.drops += n;
+    this.clipDrops += n;
+    if (this.on.drop) this.on.drop(this.drops);
   }
 
   // R-15: crop and resize with createImageBitmap. Fallback: draw on a canvas first.

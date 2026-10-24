@@ -359,7 +359,7 @@ PAUSED ──► REVIEW (player, history) ──► PAUSED
 
 ### 8.2 Capture
 
-- **R-14** Frame timing: use `requestVideoFrameCallback` on the source `<video>` when available, else rAF. Capture when `now − lastCapture ≥ 1000/fps − 2 ms`.
+- **R-14** Frame timing: use `requestVideoFrameCallback` on the source `<video>` when available, else rAF. Keep the frames on a target timeline with one slot each `1000/fps` ms: keep a frame when it is not more than half a slot before its next slot, then move the slot forward by one period (after a gap, start again from that frame). The first rule (`now − lastCapture ≥ 1000/fps − 2 ms`) lost frames silently: with ±2 ms camera jitter at 30 fps it lost about 13%, and a 30 fps camera at 24 fps gave 15 fps.
 - **R-15** Crop: center "cover" crop to the session aspect ratio, the same crop that the viewfinder shows. `createImageBitmap(video, sx, sy, sw, sh, {resizeWidth, resizeHeight, resizeQuality:'medium'})`. Transfer the bitmap to the encoder worker.
 - **R-16** The encoder worker draws the bitmap on an OffscreenCanvas (mirrored when needed), reads the pixels, and converts to YUV 4:2:0.
 - **R-17** Timestamps: session time in microseconds. Session time = end of previous clips + (frame time − clip start time). For a file, frame time = `mediaTime` from rVFC. For the camera, use rVFC `captureTime` or `expectedDisplayTime`, else `performance.now()`.
@@ -367,7 +367,7 @@ PAUSED ──► REVIEW (player, history) ──► PAUSED
 ### 8.3 Frame drops (D10)
 
 - **R-18** The encoder may have a maximum of 6 frames in flight (D19). When the capture is due and 6 frames are in flight, the app does not capture. It adds 1 to the drop count.
-- **R-19** Only encoder drops count. A slow source (for example a camera at 15 fps in low light) is not a drop.
+- **R-19** Encoder drops count. Source frames that the frame callback did not get (rVFC `presentedFrames` jumps, because the main thread was late) also count, for the slots that they leave empty. A slow source (for example a camera at 15 fps in low light) is not a drop.
 - **R-20** A dropped frame makes the previous frame longer in the timeline (variable frame rate). The app does not change settings automatically, because that changes the look.
 - **R-21** Decoder preview frames may be skipped when the decoder is late. This does not change the file and is not reported.
 - Warning UI: §11.3.
