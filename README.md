@@ -15,6 +15,8 @@ The exported file is a valid H.264 (Constrained Baseline) stream. Each conformin
 5. Touch the red button to resume. The new clip has no keyframe, so its motion moves the old picture. This is the datamosh. The mosh needs movement: if nothing moves, the old picture stays frozen.
 6. Repeat steps 4 and 5 as many times as necessary.
 
+   **Bloom**: while recording, hold the **BLOOM** button (bottom right, or the B key). Each frame then repeats the motion of the last frame again, so the picture keeps flowing and smearing in that direction. Release it to go back to the camera.
+
    To use a video file as the source (at the start or at any pause point), touch **FILE** and select a file. The **File** slider below the view sets the start point. The file plays at normal speed while you record, and pauses with the recording. At the end of the file, the recording pauses. Touch **FILE** again to select a different file, or **CAMERA** to go back to the camera. A file is never mirrored. The sound of the file is not recorded. If the camera is not available, the start screen offers **Use a video file**.
 7. To go back, touch the thumbnail (bottom left) while paused. The **History** sheet plays the video and shows one card for each pause point. Touch a card, then **Revert**, to delete all clips after that point and continue from it. **Start** deletes all clips. **New video** deletes the video.
 8. Touch **Export** (top right). For each cut, select **Mosh** or **Clean**. Touch **Export**, then **Save Video** (iOS) or **Download**.
@@ -29,7 +31,7 @@ Touch the gear (top left).
 
 | Setting | Values | Default | When it can change |
 |---|---|---|---|
-| Size (short side) | 360, 480, 720 | 480 | Before the first recorded frame |
+| Size (short side) | 360, 480, 720, 1080 | 480 | Before the first recorded frame. 720 and 1080 need a fast device |
 | Frame rate | 15, 24, 30 | 30 | Before the first recorded frame. A hint shows when the device is too slow for the rate |
 | Shape | 1:1, 4:3, 3:2, 16:9; vertical or horizontal | 4:3, from the screen | Before the first recorded frame (bar above the view) |
 | Quality (QP) | 16–44 | 28 | While paused. High = coarse blocks; low = clean detail, larger file |

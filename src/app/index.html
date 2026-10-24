@@ -74,6 +74,10 @@
     <div id="controls">
       <button id="thumbBtn" type="button" aria-label="History"><img id="thumbImg" alt=""></button>
       <button id="shutter" type="button" aria-label="Record"><span id="core"></span></button>
+      <button id="bloomBtn" type="button" aria-label="Bloom (hold)" aria-pressed="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c1.4 2.2 1.4 4.6 0 6.8-1.4-2.2-1.4-4.6 0-6.8zm0 13.2c1.4 2.2 1.4 4.6 0 6.8-1.4-2.2-1.4-4.6 0-6.8zM2 12c2.2-1.4 4.6-1.4 6.8 0-2.2 1.4-4.6 1.4-6.8 0zm13.2 0c2.2-1.4 4.6-1.4 6.8 0-2.2 1.4-4.6 1.4-6.8 0zM4.9 4.9c2.5.6 4.2 2.3 4.8 4.8-2.5-.6-4.2-2.3-4.8-4.8zm9.4 9.4c2.5.6 4.2 2.3 4.8 4.8-2.5-.6-4.2-2.3-4.8-4.8zM4.9 19.1c.6-2.5 2.3-4.2 4.8-4.8-.6 2.5-2.3 4.2-4.8 4.8zm9.4-9.4c.6-2.5 2.3-4.2 4.8-4.8-.6 2.5-2.3 4.2-4.8 4.8zM12 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/></svg>
+        <span>BLOOM</span>
+      </button>
       <button id="flip" type="button" aria-label="Change the camera">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2.5L8.2 6.3 12 10V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>
       </button>
@@ -94,7 +98,7 @@
   <section id="settingsSheet" class="sheet" aria-label="Settings">
     <header><h2>Settings</h2><button class="done" type="button" data-close>Done</button></header>
     <div class="group">
-      <div class="row"><span>Size</span><div class="seg" data-key="size"><button data-v="360">360</button><button data-v="480">480</button><button data-v="720">720</button></div></div>
+      <div class="row"><span>Size</span><div class="seg" data-key="size"><button data-v="360">360</button><button data-v="480">480</button><button data-v="720">720</button><button data-v="1080">1080</button></div></div>
       <div class="row"><span>Frame rate</span><div class="seg" data-key="fps"><button data-v="15">15</button><button data-v="24">24</button><button data-v="30">30</button></div></div>
       <p class="hint warn" id="fpsHint" hidden></p>
       <p class="hint" id="lockHint">Size, frame rate, and shape lock at the first recorded frame.</p>

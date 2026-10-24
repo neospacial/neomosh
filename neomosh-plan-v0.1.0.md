@@ -57,6 +57,8 @@ Main flow:
 | D20 | **No audio.** Audio is removed from the app (it replaces D11): no microphone, no file sound, no AAC, no audio badge, video-only MP4. §10, R-30, the audio rows of §4, §11.3, and §12, and Phase 6 do not apply. Reason: the app must use all of the device for the encoder. |
 | D21 | **WebAssembly codec.** The computation-intensive parts of the encoder and the decoder (frame loops, motion search, interpolation, transform, quantization, CAVLC, colour conversion) are C code (`src/codec/wasm/kernels.c`) compiled to WebAssembly with SIMD. The module is in the HTML file (no network request). The JavaScript codec stays as the fallback and as the reference: both must give bit-identical streams (tests). It replaces the "plain JavaScript" rule of R-09. |
 | D22 | **Capture worker.** Camera frames go from a `MediaStreamTrackProcessor` to a capture worker (crop, scale, mirror, read the pixels), and from it through a `MessagePort` to the encoder worker. The main thread is not in the frame path, so a busy page does not lose frames. The frame gate (R-14) and the encoder drop check (R-18) run in the capture worker. Chrome: the processor on the main thread, its stream transferred to the worker. Safari: the processor in the worker, with the camera track transferred. Else, or for a file source, or when the frames are turned against the `<video>`: the page path (rVFC, R-15). Measured (720p30, no GPU): main-thread long tasks 38 → 0, drops 60/150 → 0/152. Drops show by cause: encoder busy, page late (rVFC), or capture late (the processor left out frames because the capture worker was late: gaps against the median source interval, when the next frame was ready at once). When the worker waited for the frame, the gap is the camera's ("the camera skipped", shown, not a drop). The processor keeps up to 4 frames (`maxBufferSize`). Crop and scale: the worker measures up to three ways on the first frames and keeps the fastest; the info section shows the times. (1) `yuv`: `VideoFrame.copyTo` of the crop rect (I420 or NV12), then the `scale_yuv` kernel: 2×2 box halving while the reduction is 2× or more, bilinear scale, mirror, and a 3×3 colour matrix from the frame `colorSpace` (unknown: BT.601) to BT.709 limited range. No GPU, canvas, or RGBA. Before it is used, one frame goes both ways and the 8×8 block means are compared (blocks with a clipped RGB channel left out); a difference of 3 or more (Y, U, or V) rejects it. No clear frame in 10 tries: used only when the browser gives the colour space in full. (2) `bitmap`: `createImageBitmap` with resize. (3) `draw`: `drawImage` of the full frame. Measured (VM, no GPU, camera-like 1080p source): yuv 6.5 ms, draw 39 ms, bitmap 55 ms. The measurement runs before the recording, in a probe worker of its own (about 1 s after the camera starts or the size changes), and the result is kept for 7 days for each browser, camera label, camera size, and picture size. So the slow ways do not drop frames at the start of the first clip. |
+| D23 | **1080 size.** Size 1080 (short side) is an option: 1080×1080, 1440×1080, 1620×1080, 1920×1080 (or vertical). Level 4.0 at most (1920×1088 at 30 fps = 244800 MB/s, limit 245760). It is for fast devices: the frame-rate hint (D17) tells when the device is too slow. There is no Upscale export for a 1080 session (it is already at that size). |
+| D24 | **Bloom** (from §15). A button, shown only while recording (in the place of the camera button), and the B key. While held, each frame is a copy of the last P-frame of the clip (the same slice data bits), not the camera picture. The decoder applies the same motion and residual again, so the picture keeps flowing. The encoder applies the copy to its reference with a decoder (bit for bit the same), so the frames after the bloom are coded against the correct picture. The stream stays valid (FFmpeg gives the same pictures). Frames store `bloom: true`. |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -303,12 +305,12 @@ Settings panel: open with the gear (top left). Values outside these ranges are n
 |---|---|---|---|
 | Aspect ratio | 1:1, 4:3, 3:2, 16:9 | 4:3 | Ratio bar, as in neocamera |
 | Orientation | Vertical, Horizontal | from screen | Ratio bar button |
-| Size (short side) | 360, 480, 720 | 480 | 720 is for fast devices |
+| Size (short side) | 360, 480, 720, 1080 | 480 | 720 and 1080 are for fast devices (D23) |
 | Frame rate | 15, 24, 30 | 30 | Target rate. Hint at 720 (D17) |
 
 Frame-rate hint (D17): with size 720, the settings panel shows a small hint under the frame rate when the rate is more than the device can hold. Example text: "720 at 30 fps can drop frames on this device. 24 or 15 fps is safer." The hint does not block the selection. Phase 1 benchmark on Ryan's phone (Android, 8 cores): 30 fps at all 360 and 480 sizes; 960×720 24 fps (Fast, Default) or 15 fps (Max); 1280×720 15 fps.
 
-Visible sizes (horizontal; swap for vertical): 360 → 360×360, 480×360, 540×360, 640×360. 480 → 480×480, 640×480, 720×480, 852×480. 720 → 720×720, 960×720, 1080×720, 1280×720.
+Visible sizes (horizontal; swap for vertical): 360 → 360×360, 480×360, 540×360, 640×360. 480 → 480×480, 640×480, 720×480, 852×480. 720 → 720×720, 960×720, 1080×720, 1280×720. 1080 → 1080×1080, 1440×1080, 1620×1080, 1920×1080.
 
 ### 7.2 Encoder settings (stored for each frame; can change while paused, not while recording)
 
@@ -697,7 +699,7 @@ Done when: all §13.1 and §13.2 tests pass, and Ryan has run the benchmark on h
 
 ## 15. Future ideas (not in v0.1.0)
 
-- **Bloom**: repeat one P-frame many times (a held button). It is a bitstream operation, not a pixel effect, and the stream stays valid.
+- ~~**Bloom**~~: done in v0.1.0 (D24).
 - Smaller partitions (16×8, 8×16, 8×8) for finer smears.
 - Deblocking filter as a setting (softer look; the decoder needs the 8.7 filter).
 - Intra 16×16 prediction instead of I_PCM (smaller files).

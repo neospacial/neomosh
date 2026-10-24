@@ -167,6 +167,22 @@ body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;h
 #flip svg{width:26.4px;height:26.4px;fill:#fff}
 #flip[disabled]{opacity:.35}
 
+/* Bloom (plan §15): hold while recording. It takes the place of the camera button, which is locked then. */
+#bloomBtn{
+  grid-column:3;grid-row:1;justify-self:end;width:62px;height:62px;border-radius:50%;
+  background:var(--glass);display:none;flex-direction:column;align-items:center;justify-content:center;gap:1px;
+  touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
+  transition:transform .1s ease,background .1s ease;
+}
+#bloomBtn svg{width:24px;height:24px;fill:#fff}
+#bloomBtn span{font-size:8.5px;font-weight:700;letter-spacing:.08em;color:#fff}
+#bloomBtn.on{background:var(--ios-yellow);transform:scale(1.08)}
+#bloomBtn.on svg{fill:#000}
+#bloomBtn.on span{color:#000}
+body[data-state="recording"] #bloomBtn{display:flex}
+body[data-state="recording"] #flip{visibility:hidden}
+#flip{grid-column:3;grid-row:1}
+
 /* ---------- permission gate ---------- */
 #gate{
   position:absolute;inset:0;z-index:10;background:#000;

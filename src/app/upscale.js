@@ -20,6 +20,7 @@ export function upscaleSize(w, h) {
 // The first supported encoder configuration, or null (then there is no Upscale mode).
 export async function upscaleConfig(w, h, fps) {
   if (typeof VideoEncoder === 'undefined' || typeof OffscreenCanvas === 'undefined') return null;
+  if (Math.min(w, h) >= SHORT_SIDE) return null; // a 1080 session is already at the Upscale size
   const { outW, outH } = upscaleSize(w, h);
   const bitrate = Math.round((BITRATE_1080P * outW * outH) / (1920 * 1080));
   for (const codec of CODECS) {

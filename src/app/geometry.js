@@ -5,11 +5,13 @@ export const SIZE_TABLE = {
   360: { '1:1': [360, 360], '4:3': [480, 360], '3:2': [540, 360], '16:9': [640, 360] },
   480: { '1:1': [480, 480], '4:3': [640, 480], '3:2': [720, 480], '16:9': [852, 480] },
   720: { '1:1': [720, 720], '4:3': [960, 720], '3:2': [1080, 720], '16:9': [1280, 720] },
+  // D23: 1080 for fast devices. Level 4.0 (1920x1088 at 30 fps = 244800 MB/s, the limit is 245760).
+  1080: { '1:1': [1080, 1080], '4:3': [1440, 1080], '3:2': [1620, 1080], '16:9': [1920, 1080] },
 };
 
 export const ASPECTS = ['1:1', '4:3', '3:2', '16:9'];
 
-// The picture size of a session. short: 360 | 480 | 720. vertical: bool.
+// The picture size of a session. short: 360 | 480 | 720 | 1080. vertical: bool.
 export function sessionSize(short, aspect, vertical) {
   const [w, h] = SIZE_TABLE[short][aspect];
   return vertical ? { w: h, h: w } : { w, h };
