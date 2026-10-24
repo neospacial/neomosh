@@ -1,8 +1,14 @@
-// Codec worker (R-06). One source, two roles: 'enc' (encoder) or 'dec' (decoder).
+// Codec worker (R-06). One source, three roles: 'enc' (encoder), 'dec' (decoder), and 'cap' (capture).
+// The capture worker reads the camera frames from a MediaStreamTrackProcessor, so the main thread is
+// not in the frame path (R-14). It sends the RGBA pictures to the encoder through a MessagePort.
 // The build bundles the codec modules before this file and starts the worker from a Blob URL (R-10).
 
 import { Encoder } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
+import { coverCrop } from './geometry.js';
+import { FrameGate } from './capture.js';
+
+const MAX_IN_FLIGHT = 6; // R-18 (D19), the same as the main thread path
 
 let enc = null;
 let dec = null;
@@ -44,13 +50,103 @@ function warmUp() {
 // Upscale export (plan §9.3): the decoded frames, scaled, to the H.264 VideoEncoder of the browser.
 let up = null;
 
+// Capture worker state. port: to the encoder worker.
+let cap = null;
+// Encoder worker: the port from the capture worker.
+let capPort = null;
+
+function encodeRgba(m) {
+  const t0 = performance.now();
+  const [Y, U, V] = enc.inputFromRgba(m.rgba);
+  const t1 = performance.now();
+  const pkt = enc.encode(Y, U, V);
+  const t2 = performance.now();
+  self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0, capMs: m.grabMs }, [pkt.bits.buffer]);
+}
+
+// One clip from the camera. m: { readable | track, fps, mirror, sessionEndUs, seq, vw, vh }.
+async function captureClip(m, run) {
+  const readable = m.readable || new MediaStreamTrackProcessor({ track: m.track }).readable;
+  const reader = readable.getReader();
+  cap.reader = reader;
+  cap.track = m.track || null;
+  const gate = new FrameGate(m.fps);
+  let start = null, sent = 0, seq = m.seq, checked = false;
+  try {
+    for (;;) {
+      const { value: frame, done } = await reader.read();
+      if (done) break;
+      if (run !== cap.run) {
+        frame.close(); // stopped: close the queued frames until the stream ends
+        continue;
+      }
+      const fw = frame.displayWidth, fh = frame.displayHeight;
+      // The frames must have the same shape as the <video> (for example, not turned by 90 degrees).
+      if (!checked) {
+        checked = true;
+        if (m.vw !== m.vh && (fw > fh) !== (m.vw > m.vh)) {
+          frame.close();
+          self.postMessage({ cmd: 'capMismatch', fw, fh });
+          break;
+        }
+      }
+      const t = frame.timestamp / 1000;
+      if (!gate.next(t).keep) {
+        frame.close();
+        continue;
+      }
+      if (cap.inFlight >= MAX_IN_FLIGHT) {
+        // R-18, R-19: an encoder drop. The previous frame becomes longer (R-20).
+        frame.close();
+        self.postMessage({ cmd: 'capDrop' });
+        continue;
+      }
+      if (start === null) start = t;
+      const tsUs = m.sessionEndUs + Math.round((t - start) * 1000);
+      const t0 = performance.now();
+      const c = coverCrop(fw, fh, w, h);
+      ctx.setTransform(m.mirror ? -1 : 1, 0, 0, 1, m.mirror ? w : 0, 0);
+      ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
+      frame.close();
+      const rgba = ctx.getImageData(0, 0, w, h).data;
+      cap.inFlight++;
+      sent++;
+      cap.port.postMessage({ cmd: 'rgba', rgba, tsUs, seq: seq++, grabMs: performance.now() - t0 }, [rgba.buffer]);
+    }
+  } finally {
+    if (cap.reader === reader) cap.reader = null;
+    reader.cancel().catch(() => {});
+    if (m.track) m.track.stop();
+    self.postMessage({ cmd: 'capStopped', sent, seq });
+  }
+}
+
 const handlers = {
   // { role, w, h, settings }
   init(m) {
     initCanvas(m.w, m.h);
+    if (m.role === 'cap') {
+      cap = { port: m.port, inFlight: 0, run: 0, reader: null };
+      cap.port.onmessage = (e) => {
+        if (e.data.cmd === 'ack') cap.inFlight--;
+      };
+      self.postMessage({ cmd: 'ready', mstp: typeof MediaStreamTrackProcessor === 'function' });
+      return;
+    }
     warmUp();
     if (m.role === 'enc') {
       enc = new Encoder(m.w, m.h, m.settings);
+      if (m.port) {
+        capPort = m.port;
+        capPort.onmessage = (e) => {
+          try {
+            encodeRgba(e.data);
+          } catch (err) {
+            self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: 'rgba' });
+          }
+          capPort.postMessage({ cmd: 'ack' });
+        };
+      }
     } else {
       dec = new Decoder(m.w, m.h);
     }
@@ -69,6 +165,22 @@ const handlers = {
     const t2 = performance.now();
     self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0 }, [pkt.bits.buffer]);
   },
+  // Capture worker: start and stop one clip.
+  capStart(m) {
+    const run = ++cap.run;
+    captureClip(m, run).catch((err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: 'capture' }));
+  },
+  // The track stops (here or on the main thread), so the stream ends after its queued frames.
+  // If it does not end, cancel it.
+  capStop() {
+    cap.run++;
+    if (cap.track) cap.track.stop();
+    const reader = cap.reader;
+    setTimeout(() => {
+      if (reader && cap.reader === reader) reader.cancel().catch(() => {});
+    }, 500);
+  },
+
   newClip() {
     enc.newClip();
   },

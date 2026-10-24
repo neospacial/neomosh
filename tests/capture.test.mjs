@@ -1,6 +1,6 @@
 // R-14, R-19: the frame gate keeps the correct count of source frames, with camera jitter.
 
-import { FrameGate } from '../src/app/recorder.js';
+import { FrameGate } from '../src/app/capture.js';
 import path from 'node:path';
 import { assert, OUT_DIR } from './lib/session.mjs';
 import { chromium, openApp, run } from './lib/app.mjs';
@@ -90,14 +90,47 @@ export const tests = [
           // At 30 fps each source frame is kept or counted as a drop. A long gap in the source
           // itself is not a drop (R-19).
           if (fps === 30) {
-            const seen = await page.evaluate(() => window.__seen);
-            const sourceFrames = seen[seen.length - 1] - seen[0] + 1;
+            await page.click('#gearBtn');
+            const info = await page.$eval('#info', (e) => e.textContent);
+            await page.click('#settingsSheet .done');
+            let sourceFrames;
+            if (/Capture: worker/.test(info)) {
+              sourceFrames = Math.round(span * 30) + 1; // the y4m camera gives exactly 30 fps
+            } else {
+              const seen = await page.evaluate(() => window.__seen);
+              sourceFrames = seen[seen.length - 1] - seen[0] + 1;
+            }
             assert(Math.abs(f.length + drops - sourceFrames) <= 1,
-              `${sourceFrames} source frames, ${f.length} stored, ${drops} drops shown (largest gap ${maxGap.toFixed(1)} ms)`);
+              `${sourceFrames} source frames, ${f.length} stored, ${drops} drops shown (largest gap ${maxGap.toFixed(1)} ms; ${info})`);
+            assert(maxGap < 40 || drops > 0, `a gap of ${maxGap.toFixed(1)} ms with no drop`);
           }
         } finally {
           await h.close();
         }
+      }
+    },
+  },
+  {
+    name: 'app without MediaStreamTrackProcessor on the page (as Safari): records at 30 fps, valid info',
+    async fn() {
+      if (!chromium) return console.log('      (skipped: Playwright is not available)');
+      const y4m = path.join(OUT_DIR, 'cam30.y4m');
+      const h = await openApp('nomstp', { cameraFile: y4m, init: () => { delete window.MediaStreamTrackProcessor; } });
+      try {
+        const { page } = h;
+        await h.start();
+        await h.clip(2500);
+        await h.clip(1500); // a second clip: the capture path starts again
+        const f = (await h.db()).frames;
+        const clip2 = f.filter((x) => x.type !== 'hiddenI').slice(-30);
+        const rate = (clip2.length - 1) / ((clip2[clip2.length - 1].tsUs - clip2[0].tsUs) / 1e6);
+        assert(Math.abs(rate - 30) < 1, `rate ${rate.toFixed(2)}`);
+        await page.click('#gearBtn');
+        const info = await page.$eval('#info', (e) => e.textContent);
+        console.log(`      ${info.match(/Capture: \w+/)[0]}`);
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
       }
     },
   },
