@@ -3,7 +3,7 @@
 
 import { remuxOriginal } from '../mux/remux.js';
 import { upscaleConfig, upscaleExport } from './upscale.js';
-import { selfTest } from './selftest.js';
+import { selfTest, timelineCheck } from './selftest.js';
 import { sessionSize, fileStamp, formatTime } from './geometry.js';
 import { Store } from './store.js';
 import { Recorder, ST } from './recorder.js';
@@ -80,17 +80,21 @@ try {
 }
 
 // D17: the encoder speed of this device, in ms for each megapixel (measured at each pause).
-const SPEED_KEY = 'neomosh.speed';
+// D17: the measured speed, in ms for each megapixel: { enc, cap }. enc: the encoder worker (with the
+// capture on the page path). cap: the capture worker. A capture probe for the selected size is used
+// before this cap value (it is the time of the way that is in use).
+const SPEED_KEY = 'neomosh.speed2';
 function loadSpeed() {
   try {
-    return Number(localStorage.getItem(SPEED_KEY)) || 0;
+    const v = JSON.parse(localStorage.getItem(SPEED_KEY));
+    return v && typeof v === 'object' ? v : {};
   } catch {
-    return 0;
+    return {};
   }
 }
-function saveSpeed(msPerMp) {
+function saveSpeed(v) {
   try {
-    localStorage.setItem(SPEED_KEY, String(msPerMp));
+    localStorage.setItem(SPEED_KEY, JSON.stringify({ ...loadSpeed(), ...v }));
   } catch {
     /* storage not available */
   }
@@ -449,7 +453,10 @@ function onDecoded(bitmap) {
 
 function onPaused(bitmap, thumb) {
   // D17: measure the speed of this device (only after a clip of some length).
-  if (rec && rec.session && rec.encMs && rec.clipFrames > 10) saveSpeed(frameMs() / ((rec.session.w * rec.session.h) / 1e6));
+  if (rec && rec.session && rec.encMs && rec.clipFrames > 10) {
+    const mp = (rec.session.w * rec.session.h) / 1e6;
+    saveSpeed(rec.captureMode === 'worker' && rec.capMs ? { enc: rec.encMs / mp, cap: rec.capMs / mp } : { enc: rec.encMs / mp });
+  }
   checkStorage();
   // Plan §8.4 step 7, R-22: the overlay has the same size and crop as the viewfinder.
   const c = el.overlay;
@@ -653,6 +660,7 @@ function scheduleProbe() {
       localStorage.setItem(CAP_KEY, JSON.stringify(all));
     } catch { /* the result stays for this page */ }
     if (capKey() === key) rec.setCapPreset(all[key]);
+    updateFpsHint(); // the capture time of this size is known now
   }, 700);
 }
 
@@ -864,7 +872,8 @@ function updateSettingsSheet() {
       : `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
         (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '')) +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
-      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops). ` +
+      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops; ` +
+      `view skipped ${rec.viewSkips || 0}, the file has these frames). ` +
       `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
@@ -891,17 +900,23 @@ function frameMs() {
 
 // D17: a hint when the frame rate is more than this device can hold at this size.
 function updateFpsHint() {
-  const rate = loadSpeed();
+  const sp = loadSpeed();
   const { w, h } = pictureSize();
+  const mp = (w * h) / 1e6;
   const fps = sessionLocked() ? rec.session.fps : S.fps;
-  const est = (rate * w * h) / 1e6;
+  // The encoder and the capture worker work in parallel: the slower one sets the rate.
+  const probe = S.source === 'camera' ? capStore()[capKey()] : null;
+  const enc = sp.enc ? sp.enc * mp : 0;
+  const capt = probe && probe.ms ? probe.ms : sp.cap ? sp.cap * mp : 0;
+  const est = Math.max(enc, capt);
   const fits = (f) => est <= 0.85 * (1000 / f);
-  if (!rate || fits(fps)) {
+  if (!est || fits(fps)) {
     el.fpsHint.hidden = true;
     return;
   }
   const lower = [24, 15].filter((f) => f < fps && fits(f));
-  el.fpsHint.textContent = `${Math.min(w, h)} at ${fps} fps can drop frames on this device (about ${est.toFixed(0)} ms for each frame). ` +
+  el.fpsHint.textContent = `${Math.min(w, h)} at ${fps} fps can drop frames on this device (about ${est.toFixed(0)} ms for each frame: ` +
+    `encoder ${enc ? enc.toFixed(0) : '–'}, capture ${capt ? capt.toFixed(0) : '–'}). ` +
     (lower.length ? `${lower.join(' or ')} fps is safer.` : 'A smaller size is safer.');
   el.fpsHint.hidden = false;
 }
@@ -1169,7 +1184,10 @@ el.selfTest.addEventListener('click', async () => {
   try {
     await rec.store.flush();
     // Software decoder: exact. Hardware decoder: the one that players use (plan §13.3).
-    const lines = [];
+    // First the timeline of the stored frames: are frames missing that no counter shows?
+    const meta = [];
+    for await (const f of rec.store.readFrames(rec.session.id)) meta.push({ type: f.type, clip: f.clip, tsUs: f.tsUs });
+    const lines = [timelineCheck(meta, rec.params.fps, rec.drops)];
     let ok = true;
     for (const [hw, name] of [['prefer-software', 'Software decoder'], ['prefer-hardware', 'Hardware decoder']]) {
       const r = await selfTest(WORKER_SRC, rec.params, rec.store.readFrames(rec.session.id),

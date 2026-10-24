@@ -33,6 +33,12 @@ export class SourceGaps {
     this.last = null;
   }
 
+  // A new clip: the time gap to the last clip is not a gap in the source. The history stays, so the
+  // first frames of the clip are checked too.
+  restart() {
+    this.last = null;
+  }
+
   next(t) {
     const prev = this.last;
     this.last = t;

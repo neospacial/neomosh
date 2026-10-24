@@ -182,3 +182,34 @@ export async function selfTest(workerSrc, params, frames, onProgress, hw = 'no-p
     try { vd.close(); } catch { /* closed */ }
   }
 }
+
+// Timeline check (plan §13.3): gaps in the stored frame times. The base is the median frame interval of
+// each clip (at least 1/fps), so a slow camera is not a gap. A gap longer than 1.5 base intervals is a
+// lost frame in the file. The counted drops (pause points) should explain all of them.
+// frames: [{ type, clip, tsUs }] in session order. Returns a text line.
+export function timelineCheck(frames, fps, countedDrops) {
+  const clips = new Map();
+  for (const f of frames) {
+    if (f.type === 'hiddenI') continue;
+    if (!clips.has(f.clip)) clips.set(f.clip, []);
+    clips.get(f.clip).push(f.tsUs);
+  }
+  let gaps = 0, lost = 0, worst = 0, n = 0;
+  const where = [];
+  for (const ts of clips.values()) {
+    n += ts.length;
+    const d = ts.slice(1).map((t, i) => t - ts[i]);
+    if (!d.length) continue;
+    const base = Math.max(1e6 / fps, d.slice().sort((a, b) => a - b)[d.length >> 1]);
+    d.forEach((x, i) => {
+      if (x > 1.5 * base) {
+        gaps++;
+        lost += Math.round(x / base) - 1;
+        worst = Math.max(worst, x);
+        if (where.length < 5) where.push(`${(ts[i + 1] / 1e6).toFixed(2)} s`);
+      }
+    });
+  }
+  return `Timeline: ${n} frames. Gaps: ${gaps} (about ${lost} frames lost${gaps ? `, longest ${(worst / 1000).toFixed(0)} ms, at ${where.join(', ')}` : ''}). ` +
+    `Counted drops: ${countedDrops}.${lost > countedDrops ? ' Some lost frames were not counted.' : ''}`;
+}

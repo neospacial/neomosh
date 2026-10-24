@@ -186,7 +186,7 @@ export class Recorder {
           done();
         }
       } else if (m.cmd === 'capMethod') {
-        out = { method: m.method, text: methodText(m) };
+        out = { method: m.method, text: methodText(m), ms: m.times[m.method] };
       } else if (m.cmd === 'capStopped' || m.cmd === 'capMismatch' || m.cmd === 'error') done();
     };
     wk.postMessage({ cmd: 'init', role: 'cap', w, h, probe: true });
@@ -206,6 +206,7 @@ export class Recorder {
     this.capPreset = p;
     if (this.cap) {
       this.cap.postMessage({ cmd: 'capSet', method: p.method });
+      this.capMs = 0;
       this.capMethod = `${p.text} (measured before the recording)`;
     }
   }
@@ -230,7 +231,10 @@ export class Recorder {
   onCap(m) {
     if (m.cmd === 'capDrop') this.countDrops(m.n, m.kind);
     else if (m.cmd === 'capSkip') this.camSkips += m.n;
-    else if (m.cmd === 'capMethod') this.capMethod = methodText(m);
+    else if (m.cmd === 'capMethod') {
+      this.capMethod = methodText(m);
+      this.capMs = 0; // the average starts again with the chosen way
+    }
     else if (m.cmd === 'capMismatch') {
       // The frames are turned against the <video>: use the page path from now on.
       this.noCapWorker = true;
@@ -307,6 +311,7 @@ export class Recorder {
     this.clipDrops = 0;
     this.dropKinds = { enc: 0, page: 0, cap: 0 };
     this.camSkips = 0; // source frames that the camera did not give (not drops, R-19)
+    this.viewSkips = 0; // live view pictures not shown (R-21); the file has these frames
     this.clipStartFrameTime = null;
     this.gate = null;
     this.lastPresented = null;
@@ -426,7 +431,10 @@ export class Recorder {
     // R-21: no preview bitmap when the decoder is late.
     // R-26: a write failed (for example the storage is full): stop at once.
     if (this.store.error && this.state === ST.RECORDING) this.pause();
+    // R-21: the recording has priority over the live view. When the decoder is still busy with the
+    // last frame, this frame gets no preview picture. The frame is decoded and stored all the same.
     const preview = this.decInFlight === 0 && this.state === ST.RECORDING;
+    if (!preview && this.state === ST.RECORDING) this.viewSkips++;
     this.decInFlight++;
     this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview });
     this.checkIdle();

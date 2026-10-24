@@ -52,9 +52,16 @@ export const tests = [
       });
       for (const cuts of ['mosh', 'clean', ['clean', 'mosh']]) {
         const { mp4 } = verify(`vfr_${Array.isArray(cuts) ? cuts.join('-') : cuts}`, sim, cuts);
-        // A dropped hidden I-frame makes the frame before it longer: no gap in the timeline.
-        const kept = sim.frames.filter((f) => f.type !== 'hiddenI' || cuts === 'clean' || (Array.isArray(cuts) && f === sim.frames[12]));
-        mp4.samples.forEach((s, i) => assert(s.t === Math.round((kept[i].tsUs * 9) / 100), `sample ${i} time`));
+        // A Mosh cut: the hidden I-frame and its time slot are not in the file; the next frames move
+        // earlier by that slot (no hold of the last picture before the cut). Clean: no change.
+        const isKept = (f) => f.type !== 'hiddenI' || cuts === 'clean' || (Array.isArray(cuts) && f === sim.frames[12]);
+        const want = [];
+        let shift = 0;
+        sim.frames.forEach((f, i) => {
+          if (isKept(f)) want.push(f.tsUs - shift);
+          else shift += sim.frames[i + 1].tsUs - f.tsUs;
+        });
+        mp4.samples.forEach((s, i) => assert(s.t === Math.round((want[i] * 9) / 100), `sample ${i} time`));
       }
       // 24 and 15 fps sessions: the last frame lasts 1/fps.
       for (const fps of [24, 15]) {
@@ -154,10 +161,10 @@ export const tests = [
         script: [{ record: 4 }, { pause: true }, { record: 4, content: 'noise' }, { pause: true }, { revert: 1 }, { record: 4, content: 'square' }],
       });
       const { mp4 } = verify('mp4_revert', sim, 'mosh');
-      // The timeline after a revert continues from the pause point. At the Mosh cut, the last frame
-      // before the cut also covers the time of the dropped hidden I-frame.
+      // The timeline after a revert continues from the pause point. At the Mosh cut, the time slot
+      // of the hidden I-frame is removed: all frames keep their normal duration.
       const d = mp4.samples.map((s) => s.duration);
-      assert(d.join() === '3000,3000,3000,6000,3000,3000,3000', `durations ${d}`);
+      assert(d.join() === '3000,3000,3000,3000,3000,3000,3000', `durations ${d}`);
     },
   },
 ];
