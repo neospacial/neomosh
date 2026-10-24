@@ -798,7 +798,7 @@ function updateSettingsSheet() {
       : `Encoder: ${rec.encMs ? rec.encMs.toFixed(1) : '–'} ms per frame ` +
         (rec.encMs ? `(capture ${rec.grabMs.toFixed(1)}, encode ${(rec.encMs - rec.grabMs).toFixed(1)}) ` : '')) +
       `(budget ${(1000 / (locked ? rec.session.fps : S.fps)).toFixed(1)} ms). ` +
-      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}). ` +
+      `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops). ` +
       `Frames: ${rec.frameCount}. Capture: ${rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;

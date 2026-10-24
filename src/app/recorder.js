@@ -160,6 +160,7 @@ export class Recorder {
 
   onCap(m) {
     if (m.cmd === 'capDrop') this.countDrops(m.n, m.kind);
+    else if (m.cmd === 'capSkip') this.camSkips += m.n;
     else if (m.cmd === 'capMethod') this.capMethod = `${m.method}; bitmap ${m.bitmapMs.toFixed(1)} ms, draw ${m.drawMs.toFixed(1)} ms`;
     else if (m.cmd === 'capMismatch') {
       // The frames are turned against the <video>: use the page path from now on.
@@ -236,6 +237,7 @@ export class Recorder {
     this.clipFrames = 0;
     this.clipDrops = 0;
     this.dropKinds = { enc: 0, page: 0, cap: 0 };
+    this.camSkips = 0; // source frames that the camera did not give (not drops, R-19)
     this.clipStartFrameTime = null;
     this.gate = null;
     this.lastPresented = null;
