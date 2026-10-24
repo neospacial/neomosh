@@ -4,6 +4,7 @@ import { FrameGate, SourceGaps } from '../src/app/capture.js';
 import { colourMatrix } from '../src/app/camyuv.js';
 import { Kernels } from '../src/codec/wasm.js';
 import path from 'node:path';
+import fs from 'node:fs';
 import { assert, OUT_DIR } from './lib/session.mjs';
 import { chromium, openApp, run, checkMp4 } from './lib/app.mjs';
 
@@ -265,6 +266,48 @@ export const tests = [
         const s = db.sessions[0];
         const c = checkMp4(mp4, s.w, s.h);
         assert(c.count === db.frames.filter((x) => x.type !== 'hiddenI').length, 'frame count');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
+  {
+    name: 'capture probe before the recording: saved, the first clip has no capture drops, reused after a reload',
+    async fn() {
+      if (!chromium) return console.log('      (skipped: Playwright is not available)');
+      const y4m = path.join(OUT_DIR, 'camnat540.y4m');
+      if (!fs.existsSync(y4m)) {
+        run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=960x540:rate=30,eq=contrast=0.75:saturation=0.6,noise=alls=14:allf=t',
+          '-t', '4', '-pix_fmt', 'yuv420p', y4m]);
+      }
+      const h = await openApp('probe', { cameraFile: y4m });
+      try {
+        const { page } = h;
+        await h.start();
+        await page.waitForFunction(() => localStorage.getItem('neomosh.capture'), null, { timeout: 15000 });
+        await h.clip(3000);
+        const info = async () => {
+          await page.click('#gearBtn');
+          const t = await page.$eval('#info', (e) => e.textContent);
+          await page.click('#settingsSheet .done');
+          return t;
+        };
+        const i1 = await info();
+        assert(/measured before the recording/.test(i1), `the probe result was not used: ${i1}`);
+        assert(/capture late 0/.test(i1), `capture drops in the first clip: ${i1}`);
+        const f = (await h.db()).frames;
+        const rate = (f.length - 1) / ((f[f.length - 1].tsUs - f[0].tsUs) / 1e6);
+        assert(Math.abs(rate - 30) < 1, `rate ${rate.toFixed(2)}`);
+        await page.reload();
+        await page.click('#gateNew');
+        await h.waitState('idle');
+        await h.clip(1500);
+        const i2 = await info();
+        const way = (t) => t.match(/Capture: worker \(([^)]*)\)/)[1];
+        assert(way(i2) === way(i1), `the saved result was not used after a reload: ${way(i1)} / ${way(i2)}`);
+        const keys = Object.keys(JSON.parse(await page.evaluate(() => localStorage.getItem('neomosh.capture'))));
+        assert(keys.length === 1, `one saved result: ${keys.join(' ; ')}`);
         assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
       } finally {
         await h.close();

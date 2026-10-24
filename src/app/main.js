@@ -237,6 +237,7 @@ function applyStream(stream, facing) {
   countCameras();
   layoutFrame();
   setTimeout(layoutFrame, 150);
+  setTimeout(scheduleProbe, 300); // the track settings are ready after a short time
 }
 
 function readCapabilities() {
@@ -595,7 +596,68 @@ el.srcFile.addEventListener('click', () => {
 });
 el.fileInput.addEventListener('change', () => openFile(el.fileInput.files && el.fileInput.files[0]));
 
+/* ---------------- capture probe (D22) ---------------- */
+
+// The fastest crop way of the capture worker depends on the browser, the camera, and the sizes. It is
+// measured once before the recording (about 1 s) and kept for 7 days.
+const CAP_KEY = 'neomosh.capture';
+const CAP_DAYS = 7;
+let capSaved = null;
+let probing = null;
+let probeTimer = 0;
+
+function capStore() {
+  if (!capSaved) {
+    try {
+      capSaved = JSON.parse(localStorage.getItem(CAP_KEY)) || {};
+    } catch {
+      capSaved = {};
+    }
+  }
+  return capSaved;
+}
+
+function capKey() {
+  const t = videoTrack();
+  const st = t && t.getSettings ? t.getSettings() : {};
+  const { w, h } = pictureSize();
+  // The camera label (for example "camera2 0, facing back") is stable; the deviceId can change for each load.
+  return [browserName(), (t && t.label) || S.facing, `${st.width}x${st.height}`, `${w}x${h}`].join('|');
+}
+
+function scheduleProbe() {
+  if (!rec || S.source !== 'camera' || !S.stream || (rec.state !== ST.IDLE && rec.state !== ST.PAUSED)) return;
+  const key = capKey();
+  const saved = capStore()[key];
+  if (saved && Date.now() - saved.time < CAP_DAYS * 864e5) {
+    rec.setCapPreset(saved);
+    return;
+  }
+  if (probing === key) return;
+  clearTimeout(probeTimer);
+  probeTimer = setTimeout(async () => {
+    if (capKey() !== key || probing) return;
+    probing = key;
+    const { w, h } = pictureSize();
+    let r = null;
+    try {
+      r = await rec.probeCapture(w, h, mirrored());
+    } catch {
+      r = null;
+    }
+    probing = null;
+    if (!r) return;
+    const all = capStore();
+    all[key] = { ...r, time: Date.now() };
+    try {
+      localStorage.setItem(CAP_KEY, JSON.stringify(all));
+    } catch { /* the result stays for this page */ }
+    if (capKey() === key) rec.setCapPreset(all[key]);
+  }, 700);
+}
+
 function refreshUI() {
+  scheduleProbe();
   const st = state();
   const idleOrPaused = st === ST.IDLE || st === ST.PAUSED;
   el.shutter.disabled = !(S.source === 'file' ? !!S.fileUrl : S.hasVideo) || !(idleOrPaused || st === ST.RECORDING);

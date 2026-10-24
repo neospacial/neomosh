@@ -23,6 +23,12 @@ export function makeWorker(src) {
   return wk;
 }
 
+// The info text of a capture way result: the way, the times of each way, the YUV colour check.
+function methodText(m) {
+  return `${m.method}; ${Object.entries(m.times).map(([k, v]) => `${k} ${v.toFixed(1)} ms`).join(', ')}` +
+    (m.calib ? `; yuv check ${m.calib}` : '');
+}
+
 // Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
 export class Recorder {
   // captureMethod: force the crop way of the capture worker ('yuv', 'bitmap', 'draw'; debug, D22).
@@ -99,7 +105,10 @@ export class Recorder {
     const ch = new MessageChannel();
     this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2 }, [ch.port2]);
     this.dec.postMessage({ cmd: 'init', role: 'dec', w, h });
-    this.cap.postMessage({ cmd: 'init', role: 'cap', w, h, port: ch.port1, method: this.captureMethod }, [ch.port1]);
+    // The way: forced (debug), else from the probe before the recording, else measured on the first frames.
+    const preset = this.captureMethod || (this.capPreset && this.capPreset.method);
+    if (!this.captureMethod && this.capPreset) this.capMethod = `${this.capPreset.text} (measured before the recording)`;
+    this.cap.postMessage({ cmd: 'init', role: 'cap', w, h, port: ch.port1, method: preset }, [ch.port1]);
     await r;
   }
 
@@ -151,6 +160,56 @@ export class Recorder {
     return true;
   }
 
+  // Before the recording (D22): measure the crop ways of the capture worker on about 25 camera frames
+  // (about 1 s) in a worker of its own, so that the slow ways do not drop frames of the first clip.
+  // Resolves { method, text } or null (no camera, no processor, or no result).
+  async probeCapture(w, h, mirror) {
+    const stream = this.video.srcObject;
+    const track = stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    if (!track || track.readyState !== 'live' || this.captureMethod) return null;
+    const wk = makeWorker(this.workerSrc);
+    const clone = track.clone();
+    let done;
+    const result = new Promise((resolve) => (done = resolve));
+    let out = null;
+    wk.onmessage = (e) => {
+      const m = e.data;
+      if (m.cmd === 'ready') {
+        const base = { cmd: 'capStart', fps: 30, mirror, sessionEndUs: 0, seq: 0, vw: this.video.videoWidth, vh: this.video.videoHeight };
+        try {
+          if (typeof MediaStreamTrackProcessor === 'function') {
+            const readable = new MediaStreamTrackProcessor({ track: clone, maxBufferSize: 4 }).readable;
+            wk.postMessage({ ...base, readable }, [readable]);
+          } else if (m.mstp) wk.postMessage({ ...base, track: clone }, [clone]);
+          else done();
+        } catch {
+          done();
+        }
+      } else if (m.cmd === 'capMethod') {
+        out = { method: m.method, text: methodText(m) };
+      } else if (m.cmd === 'capStopped' || m.cmd === 'capMismatch' || m.cmd === 'error') done();
+    };
+    wk.postMessage({ cmd: 'init', role: 'cap', w, h, probe: true });
+    const timer = setTimeout(done, 5000);
+    await result;
+    clearTimeout(timer);
+    clone.stop();
+    // Let the worker close the frames that are still in its queue, then end it.
+    setTimeout(() => wk.terminate(), 400);
+    return out;
+  }
+
+  // A probe result for this camera and size: the next workers use it, and a running capture worker
+  // changes to it at once.
+  setCapPreset(p) {
+    if (this.captureMethod || (this.capPreset && this.capPreset.method === p.method && this.capPreset.text === p.text)) return;
+    this.capPreset = p;
+    if (this.cap) {
+      this.cap.postMessage({ cmd: 'capSet', method: p.method });
+      this.capMethod = `${p.text} (measured before the recording)`;
+    }
+  }
+
   // The page goes away (pagehide): stop the camera track of the capture at once, so that no camera
   // frame is left in a page that ends.
   stopCaptureNow() {
@@ -171,10 +230,7 @@ export class Recorder {
   onCap(m) {
     if (m.cmd === 'capDrop') this.countDrops(m.n, m.kind);
     else if (m.cmd === 'capSkip') this.camSkips += m.n;
-    else if (m.cmd === 'capMethod') {
-      this.capMethod = `${m.method}; ${Object.entries(m.times).map(([k, v]) => `${k} ${v.toFixed(1)} ms`).join(', ')}` +
-        (m.calib ? `; yuv check ${m.calib}` : '');
-    }
+    else if (m.cmd === 'capMethod') this.capMethod = methodText(m);
     else if (m.cmd === 'capMismatch') {
       // The frames are turned against the <video>: use the page path from now on.
       this.noCapWorker = true;
