@@ -1,6 +1,7 @@
 // Build: inline all sources into one standalone HTML file for each page (R-10).
 //   dist/neomosh-v<version>.html        the app
 //   dist/neomosh-bench-v<version>.html  the benchmark page (plan §13.5)
+//   index.html                          a copy of the app, for GitHub Pages (the repository root)
 // Usage: node tools/build.mjs
 //
 // HTML templates use these markers:
@@ -78,5 +79,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     const html = buildPage(tpl);
     fs.writeFileSync(path.join(dist, out), html);
     console.log(`dist/${out} (${(html.length / 1024).toFixed(0)} KB)`);
+    if (tpl === PAGES[0][0]) {
+      fs.writeFileSync(path.join(root, 'index.html'), html);
+      console.log('index.html (the same as the app)');
+    }
   }
 }

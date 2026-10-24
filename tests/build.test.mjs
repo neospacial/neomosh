@@ -1,10 +1,21 @@
 // Phase 0: the build makes standalone pages. R-10: the shipped files make no network requests.
 
 import vm from 'node:vm';
+import fs from 'node:fs';
 import { buildPage, bundle, CODEC_MODULES, PAGES } from '../tools/build.mjs';
 import { assert } from './lib/session.mjs';
 
 export const tests = [
+  {
+    name: 'index.html (GitHub Pages) and dist are the same as a new build',
+    fn() {
+      const html = buildPage(PAGES[0][0]);
+      const root = new URL('..', import.meta.url);
+      for (const f of ['index.html', `dist/${PAGES[0][1]}`]) {
+        assert(fs.readFileSync(new URL(f, root), 'utf8') === html, `${f} is not the current build: run node tools/build.mjs`);
+      }
+    },
+  },
   {
     name: 'each page builds, with no external URLs',
     fn() {
