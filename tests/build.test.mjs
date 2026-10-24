@@ -10,9 +10,11 @@ export const tests = [
     fn() {
       for (const [tpl] of PAGES) {
         const html = buildPage(tpl);
-        assert(!/@(VERSION|WORKER|css|js)/.test(html.replace(/@media/g, '')), `${tpl}: marker left`);
+        assert(!/@(VERSION|WORKER|css|js|modules)/.test(html.replace(/@media/g, '')), `${tpl}: marker left`);
         assert(!/https?:\/\//i.test(html), `${tpl}: contains a URL`);
         assert(!/\b(fetch|XMLHttpRequest|importScripts|WebSocket)\s*\(/.test(html), `${tpl}: network API`);
+        // Each inline script compiles.
+        for (const m of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) new vm.Script(m[1], { filename: tpl });
       }
     },
   },

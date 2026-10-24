@@ -1,19 +1,127 @@
-<!DOCTYPE html>
+<!-- neomosh v@VERSION@ -->
+<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
 <title>neomosh</title>
 <!--@css:style.css-->
 </head>
-<body>
-<div id="gate">
-  <h1>neomosh</h1>
-  <p class="ver">v@VERSION@</p>
-  <p class="note">Development build. The recorder UI comes in Phase 3.</p>
+<body data-state="gate" data-lock="0" data-preview="1" data-pulse="0">
+<div id="app">
+
+  <div id="topBar">
+    <button id="gearBtn" class="topBtn" type="button" aria-label="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2.1-1.6-2-3.5-2.5 1a7.4 7.4 0 0 0-1.7-1L15 3.3h-4l-.4 2.6a7.4 7.4 0 0 0-1.7 1l-2.5-1-2 3.5L6.6 11a7.6 7.6 0 0 0 0 2l-2.1 1.6 2 3.5 2.5-1a7.4 7.4 0 0 0 1.7 1l.4 2.6h4l.4-2.6a7.4 7.4 0 0 0 1.7-1l2.5 1 2-3.5zM13 15.5a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7z" transform="translate(-1 0)"/></svg>
+    </button>
+    <div id="topCenter">
+      <div id="recPill"><span id="recDot"></span><span id="timer">00:00</span><span id="clipLbl"></span></div>
+      <button id="dropBadge" class="badge" type="button" aria-label="Dropped frames">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 1.5 21h21L12 3zm1 15h-2v-2h2v2zm0-4h-2V9h2v5z"/></svg><span id="dropN">0</span>
+      </button>
+      <button id="micBadge" class="badge" type="button" aria-label="No audio">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-4.08A7 7 0 0 0 19 11z"/><path d="M3 3l18 18" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <button id="exportBtn" class="topBtn" type="button">Export</button>
+  </div>
+
+  <div id="ratioBar">
+    <button id="orientBtn" type="button" aria-label="Orientation">Vertical</button>
+    <span class="sep"></span>
+    <button class="ratio" data-a="1:1" data-v="1:1" type="button">1:1</button>
+    <button class="ratio active" data-a="4:3" data-v="3:4" type="button">4:3</button>
+    <button class="ratio" data-a="3:2" data-v="2:3" type="button">3:2</button>
+    <button class="ratio" data-a="16:9" data-v="9:16" type="button">16:9</button>
+  </div>
+
+  <div id="guideBar">
+    <span class="lbl">Guide</span>
+    <input id="opacity" type="range" min="0" max="100" step="1" value="50" aria-label="Guide opacity">
+    <span id="pct">50%</span>
+  </div>
+
+  <div id="stage">
+    <div id="frame">
+      <video id="preview" playsinline autoplay muted></video>
+      <canvas id="mosh"></canvas>
+      <canvas id="overlay"></canvas>
+      <div id="focusBox">
+        <div id="expo">
+          <svg id="expoSun" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm0-6l1.6 3.2h-3.2L12 2zm0 20l-1.6-3.2h3.2L12 22zM2 12l3.2-1.6v3.2L2 12zm20 0l-3.2 1.6v-3.2L22 12zM5 5l3.4.9-2.5 2.5L5 5zm14 14l-3.4-.9 2.5-2.5L19 19zM19 5l-.9 3.4-2.5-2.5L19 5zM5 19l.9-3.4 2.5 2.5L5 19z"/></svg>
+        </div>
+      </div>
+      <div id="lockBadge">AE/AF LOCK</div>
+    </div>
+    <div id="toast"></div>
+  </div>
+
+  <div id="bottomBar">
+    <div id="modes">
+      <button class="mode active" id="srcCamera" type="button">Camera</button>
+      <button class="mode" id="srcFile" type="button" disabled>File</button>
+    </div>
+    <div id="controls">
+      <button id="thumbBtn" type="button" aria-label="History"><img id="thumbImg" alt=""></button>
+      <button id="shutter" type="button" aria-label="Record"><span id="core"></span></button>
+      <button id="flip" type="button" aria-label="Change the camera">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2.5L8.2 6.3 12 10V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="gate" class="show">
+    <h1 id="gateTitle">neomosh</h1>
+    <p id="gateText">This app records a datamosh video. It needs the camera. Touch the button and give permission.</p>
+    <button id="gateBtn" type="button">Start</button>
+    <p class="ver">v@VERSION@</p>
+  </div>
+
+  <div id="sheetBack"></div>
+
+  <section id="settingsSheet" class="sheet" aria-label="Settings">
+    <header><h2>Settings</h2><button class="done" type="button" data-close>Done</button></header>
+    <div class="group">
+      <div class="row"><span>Size</span><div class="seg" data-key="size"><button data-v="360">360</button><button data-v="480">480</button><button data-v="720">720</button></div></div>
+      <div class="row"><span>Frame rate</span><div class="seg" data-key="fps"><button data-v="15">15</button><button data-v="24">24</button><button data-v="30">30</button></div></div>
+      <p class="hint" id="lockHint">Size, frame rate, and shape lock at the first recorded frame.</p>
+    </div>
+    <div class="group">
+      <div class="row"><span>Mosh preview</span><div class="seg" data-key="preview"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
+      <div class="row"><span>Mirror front camera</span><div class="seg" data-key="mirror"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
+    </div>
+    <div class="group info" id="info"></div>
+  </section>
+
+  <section id="exportSheet" class="sheet" aria-label="Export">
+    <header><h2>Export</h2><button class="done" type="button" data-close>Close</button></header>
+    <div class="group">
+      <div class="row"><span>Mode</span><span class="val">Original (lossless)</span></div>
+      <div class="row cutsRow"><span>Cuts</span><div class="seg" id="allCuts"><button data-v="mosh">All Mosh</button><button data-v="clean">All Clean</button></div></div>
+      <div id="cutList"></div>
+    </div>
+    <div class="group">
+      <div id="progress"><i></i></div>
+      <p class="hint" id="exportMsg"></p>
+      <div class="actions">
+        <button id="exportGo" class="primary" type="button">Export</button>
+        <button id="exportCancel" type="button">Cancel</button>
+        <button id="exportShare" class="primary" type="button">Save Video</button>
+        <button id="exportDownload" type="button">Download</button>
+      </div>
+    </div>
+  </section>
+
 </div>
-<script>const CODEC_SRC = "@WORKER:codec";</script>
-<!--@js:main.js-->
+<script>
+const VERSION = '@VERSION@';
+const WORKER_SRC = "@WORKER:codec,app/worker.js";
+</script>
+<!--@modules:codec,mux/mp4.js,mux/remux.js,app/geometry.js,app/store.js,app/recorder.js,app/main.js-->
 </body>
 </html>
