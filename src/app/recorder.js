@@ -3,6 +3,7 @@
 import { DEFAULT_SETTINGS, checkSettings } from '../codec/encoder.js';
 import { streamParams } from '../codec/headers.js';
 import { coverCrop } from './geometry.js';
+import { FrameGate } from './capture.js';
 
 export const ST = {
   IDLE: 'idle',
@@ -20,28 +21,6 @@ export function makeWorker(src) {
   const wk = new Worker(url);
   URL.revokeObjectURL(url);
   return wk;
-}
-
-// R-14: select the source frames for the target frame rate. The timeline has one slot each
-// 1000/fps ms. A frame is kept when it is not more than half a slot before its slot, so camera
-// jitter does not lose frames, and a 30 fps source at 24 fps gives 24 fps.
-// next(t, missed) -> { keep, lost }. missed: source frames that the frame callback did not see.
-// lost: empty slots because of those frames (R-19). A slow source alone gives no lost slots.
-export class FrameGate {
-  constructor(fps) {
-    this.period = 1000 / fps;
-    this.due = null;
-  }
-
-  next(t, missed = 0) {
-    const period = this.period;
-    if (this.due === null) this.due = t;
-    if (t < this.due - period / 2) return { keep: false, lost: 0 }; // before its slot
-    const lost = missed > 0 ? Math.min(missed, Math.max(0, Math.floor((t - this.due) / period + 0.5))) : 0;
-    // After a gap, the timeline starts again from this frame (no burst of frames to catch up).
-    this.due = Math.max(this.due + period, t + period / 2);
-    return { keep: true, lost };
-  }
 }
 
 // Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
@@ -72,9 +51,11 @@ export class Recorder {
     this.decInFlight = 0;
     this.drops = 0;
     this.clipDrops = 0;
+    this.dropKinds = { enc: 0, page: 0 }; // R-19: encoder busy, or source frames the page did not see
     this.seq = 0;
     this.encMs = 0; // average time in the encoder worker for each frame
     this.grabMs = 0; // the part for drawing, reading the pixels, and RGB to YUV
+    this.capMs = 0; // capture worker: drawing and reading the pixels (in parallel with the encoder)
   }
 
   setState(s) {
@@ -95,28 +76,106 @@ export class Recorder {
     this.stopWorkers();
     this.enc = makeWorker(this.workerSrc);
     this.dec = makeWorker(this.workerSrc);
+    this.cap = makeWorker(this.workerSrc);
     this.enc.onmessage = (e) => this.onEnc(e.data);
     this.dec.onmessage = (e) => this.onDec(e.data);
+    this.cap.onmessage = (e) => this.onCap(e.data);
     const ready = (wk) => new Promise((resolve) => {
       const prev = wk.onmessage;
       wk.onmessage = (e) => {
         if (e.data.cmd === 'ready') {
-          this.wasm = e.data.wasm;
+          if (wk === this.cap) this.capMstp = e.data.mstp;
+          else this.wasm = e.data.wasm;
           wk.onmessage = prev;
           resolve();
         } else prev(e);
       };
     });
-    const r = Promise.all([ready(this.enc), ready(this.dec)]);
-    this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings });
+    const r = Promise.all([ready(this.enc), ready(this.dec), ready(this.cap)]);
+    // The capture worker sends the pictures straight to the encoder worker (R-14).
+    const ch = new MessageChannel();
+    this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2 }, [ch.port2]);
     this.dec.postMessage({ cmd: 'init', role: 'dec', w, h });
+    this.cap.postMessage({ cmd: 'init', role: 'cap', w, h, port: ch.port1 }, [ch.port1]);
     await r;
   }
 
   stopWorkers() {
-    if (this.enc) this.enc.terminate();
-    if (this.dec) this.dec.terminate();
-    this.enc = this.dec = null;
+    for (const wk of [this.enc, this.dec, this.cap]) if (wk) wk.terminate();
+    this.enc = this.dec = this.cap = null;
+    this.capActive = false;
+    if (this.capTrack) this.capTrack.stop();
+    this.capTrack = null;
+  }
+
+  // R-14: the camera frames go to the capture worker (MediaStreamTrackProcessor), not through the
+  // main thread. Returns false when this is not possible: then the page path (rVFC) is used.
+  startCapture() {
+    const stream = this.video.srcObject;
+    const track = this.source === 'camera' && !this.noCapWorker && this.cap && stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
+    if (!track || track.readyState !== 'live') return false;
+    const base = {
+      cmd: 'capStart', fps: this.params.fps, mirror: this.mirror, sessionEndUs: this.sessionEndUs, seq: this.seq,
+      vw: this.video.videoWidth, vh: this.video.videoHeight,
+    };
+    const clone = track.clone();
+    try {
+      if (typeof MediaStreamTrackProcessor === 'function') {
+        // Chrome: the processor on the main thread, the stream to the worker.
+        const readable = new MediaStreamTrackProcessor({ track: clone }).readable;
+        this.cap.postMessage({ ...base, readable }, [readable]);
+        this.capTrack = clone;
+      } else if (this.capMstp) {
+        // Safari: the processor only in a worker, so the track goes to the worker.
+        this.cap.postMessage({ ...base, track: clone }, [clone]);
+        this.capTrack = null;
+      } else {
+        clone.stop();
+        return false;
+      }
+    } catch {
+      clone.stop();
+      this.noCapWorker = true;
+      return false;
+    }
+    this.capActive = true;
+    this.captureMode = 'worker';
+    return true;
+  }
+
+  // Stop the capture worker clip. Resolves when it sent its last frame to the encoder.
+  stopCapture() {
+    if (!this.capActive) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.capWaiter = resolve;
+      if (this.capTrack) this.capTrack.stop(); // the stream ends after its queued frames
+      this.cap.postMessage({ cmd: 'capStop' });
+    });
+  }
+
+  onCap(m) {
+    if (m.cmd === 'capDrop') this.countDrops(1, 'enc');
+    else if (m.cmd === 'capMismatch') {
+      // The frames are turned against the <video>: use the page path from now on.
+      this.noCapWorker = true;
+    } else if (m.cmd === 'capStopped') {
+      // The packets of these frames decrement encInFlight (it can be below 0 until now).
+      this.encInFlight += m.sent;
+      this.seq = m.seq;
+      this.capActive = false;
+      if (this.capTrack) this.capTrack.stop();
+      this.capTrack = null;
+      if (this.capWaiter) {
+        const w = this.capWaiter;
+        this.capWaiter = null;
+        w();
+      } else if (this.state === ST.RECORDING) {
+        this.loop(); // after a mismatch: continue with the page path
+      }
+      this.checkIdle();
+    } else if (m.cmd === 'error') {
+      this.fail(`Capture: ${m.message}`);
+    }
   }
 
   // Start a new session (plan §7.1: size and frame rate are locked from here).
@@ -168,13 +227,17 @@ export class Recorder {
     this.clip++;
     this.clipFrames = 0;
     this.clipDrops = 0;
+    this.dropKinds = { enc: 0, page: 0 };
     this.clipStartFrameTime = null;
     this.gate = null;
     this.lastPresented = null;
     this.chain = Promise.resolve();
     this.setState(ST.RECORDING);
     this.lockScreen();
-    this.loop();
+    if (!this.startCapture()) {
+      this.captureMode = 'page';
+      this.loop();
+    }
   }
 
   // R-14: frame timing from requestVideoFrameCallback, else requestAnimationFrame.
@@ -206,11 +269,11 @@ export class Recorder {
     const p = this.params;
     if (!this.gate) this.gate = new FrameGate(p.fps);
     const g = this.gate.next(t, missed);
-    if (g.lost > 0) this.countDrops(g.lost);
+    if (g.lost > 0) this.countDrops(g.lost, 'page');
     if (!g.keep) return;
     if (this.encInFlight >= MAX_IN_FLIGHT) {
       // R-18, R-19: an encoder drop. The previous frame becomes longer (R-20).
-      this.countDrops(1);
+      this.countDrops(1, 'enc');
       return;
     }
     const v = this.video;
@@ -231,9 +294,10 @@ export class Recorder {
     });
   }
 
-  countDrops(n) {
+  countDrops(n, kind) {
     this.drops += n;
     this.clipDrops += n;
+    this.dropKinds[kind] += n;
     if (this.on.drop) this.on.drop(this.drops);
   }
 
@@ -262,7 +326,7 @@ export class Recorder {
 
   onEnc(m) {
     if (m.cmd === 'error') {
-      if (m.during === 'frame') this.encInFlight--;
+      if (m.during === 'frame' || m.during === 'rgba') this.encInFlight--;
       this.fail(`Encoder: ${m.message}`);
       return this.checkIdle();
     }
@@ -270,6 +334,7 @@ export class Recorder {
     this.encInFlight--;
     this.encMs = this.encMs ? this.encMs * 0.9 + m.ms * 0.1 : m.ms;
     this.grabMs = this.grabMs ? this.grabMs * 0.9 + m.grabMs * 0.1 : m.grabMs;
+    if (m.capMs !== undefined) this.capMs = this.capMs ? this.capMs * 0.9 + m.capMs * 0.1 : m.capMs;
     const pkt = m.pkt;
     const index = this.frameCount++;
     if (pkt.type === 'hiddenI') this.cuts.push(index);
@@ -321,6 +386,7 @@ export class Recorder {
     this.setState(ST.PAUSING); // step 1: the capture loop stops
     this.unlockScreen();
     if (reason && this.on.toast) this.on.toast(reason);
+    await this.stopCapture();
     await this.chain;
     // Steps 2 and 3: wait for the encoder and the decoder.
     await new Promise((resolve) => {

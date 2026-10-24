@@ -89,7 +89,7 @@ The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` fil
 | `src/codec/` | H.264 subset: bit I/O, tables, transform, interpolation, motion vector prediction, CAVLC, headers, colour, encoder, decoder |
 | `src/codec/wasm/` | The computation-intensive parts of the codec in C, compiled to WebAssembly with SIMD. The JavaScript functions are the fallback and the reference; the tests prove that both give the same bits |
 | `src/bench/` | Benchmark page and core |
-| `src/app/` | App: user interface (based on neocamera v1.5.0), recorder, workers, storage |
+| `src/app/` | App: user interface (based on neocamera v1.5.0), recorder, workers (capture, encoder, decoder), storage, Upscale export, self-test |
 | `src/mux/` | MP4 muxer and lossless export (remux) |
 | `tools/build.mjs` | Inlines all sources into one HTML file for each page |
 | `tests/` | Node tests |
@@ -101,6 +101,6 @@ The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` fil
 - The export has only one sync frame (frame 0), unless a cut is set to Clean. Players seek slowly in long files. Playback is normal.
 - At a Mosh cut, the hidden I-frame is not in the file. The frame before the cut stays on screen for that time, so the timeline has no gap.
 - I-frames use I_PCM (no compression). Their bitrate can be above the level limit. The level is selected only from the frame size and the macroblock rate.
-- A slow device drops frames. Use a smaller size, a lower frame rate, or a smaller search range.
+- A slow device drops frames. Touch the amber badge: it shows the cause. "Encoder busy": use a smaller size, a lower frame rate, or a smaller search range. "Page late": the page did not get all camera frames; close other apps. In Chrome, the camera frames go to a capture worker, so the page is not in the frame path. In other browsers, and for a file source, the page captures the frames.
 - No audio. The browser has no AAC encoder on all platforms, and audio made the frame drops worse (plan D20).
 - When the storage is full, the recording pauses and the last clip is not kept. Export the video, or free some space.
