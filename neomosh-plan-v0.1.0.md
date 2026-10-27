@@ -438,7 +438,7 @@ Known limit: the file has only one sync frame (frame 0), unless a cut is Clean. 
 1. Decode the kept frames with our decoder, in a worker.
 2. Draw each frame scaled on a canvas (nearest or smooth).
 3. Make a `VideoFrame` with the frame timestamp. Encode with `VideoEncoder` (H.264, `avc1.640028` or the best supported, about 16–20 Mbit/s at 1080p, keyframe every 2 s).
-4. Mux with the same MP4 muxer. Use the `avcC` from `decoderConfig.description`.
+4. Mux with the same MP4 muxer. Use the `avcC` from `decoderConfig.description`. Encoders with B-frames (desktop computers) give the chunks in decode order, not display order: then the decode times are the display times in order, each sample gets a composition offset (`ctts` version 0), and an edit list (`elst`) removes the start delay. Encoders without B-frames give no `ctts` and no edit list.
 
 This mode exists only when `VideoEncoder` supports H.264. The mosh is already in the pixels, so normal keyframes do no harm here.
 

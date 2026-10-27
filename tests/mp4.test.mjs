@@ -7,6 +7,8 @@ import { simulate, verify, probeStream, assert, OUT_DIR } from './lib/session.mj
 import { Remuxer, remuxOriginal, VIDEO_TIMESCALE } from '../src/mux/remux.js';
 import { Encoder } from '../src/codec/encoder.js';
 import { streamParams, annexB } from '../src/codec/headers.js';
+import { muxMp4 } from '../src/mux/mp4.js';
+import { upscaleSamples } from '../src/app/upscale.js';
 
 function rng(seed) {
   let s = seed >>> 0;
@@ -165,6 +167,78 @@ export const tests = [
       // of the hidden I-frame is removed: all frames keep their normal duration.
       const d = mp4.samples.map((s) => s.duration);
       assert(d.join() === '3000,3000,3000,3000,3000,3000,3000', `durations ${d}`);
+    },
+  },
+  {
+    name: 'Upscale export with B-frames (desktop encoders): ctts and edit list; FFmpeg times and pictures are correct',
+    fn() {
+      // A real stream with B-frames from libx264, with access unit delimiters to split the frames.
+      const ref = path.join(OUT_DIR, 'bframes_ref.mp4');
+      const es = path.join(OUT_DIR, 'bframes.h264');
+      const enc = spawnSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=size=160x120:rate=30', '-frames:v', '40',
+        '-c:v', 'libx264', '-bf', '3', '-g', '15', '-x264-params', 'aud=1', '-pix_fmt', 'yuv420p', ref]);
+      if (enc.status !== 0) return console.log('      (skipped: no libx264 in FFmpeg)');
+      spawnSync('ffmpeg', ['-v', 'error', '-y', '-i', ref, '-c', 'copy', '-bsf:v', 'h264_mp4toannexb', '-f', 'h264', es]);
+      const pk = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', ref])
+        .stdout.toString().trim().split('\n').map((l) => l.split(','));
+      // Split the Annex B stream into NAL units, then into access units at each delimiter (type 9).
+      const buf = fs.readFileSync(es);
+      const nals = [];
+      for (let i = 0, start = -1; i <= buf.length; i++) {
+        const sc = i + 3 <= buf.length && buf[i] === 0 && buf[i + 1] === 0 && buf[i + 2] === 1;
+        if (sc || i === buf.length) {
+          if (start >= 0) {
+            let end = i;
+            while (end > start && buf[end - 1] === 0) end--;
+            nals.push(buf.subarray(start, end));
+          }
+          if (sc) {
+            start = i + 3;
+            i += 2;
+          }
+        }
+      }
+      let sps, pps;
+      const aus = [];
+      for (const n of nals) {
+        const t = n[0] & 31;
+        if (t === 9) aus.push([]);
+        else if (t === 7) sps = sps || n;
+        else if (t === 8) pps = pps || n;
+        else if (t !== 6) aus[aus.length - 1].push(n);
+      }
+      assert(aus.length === 40 && pk.length === 40, `${aus.length} access units, ${pk.length} packets`);
+      const chunks = aus.map((list, i) => {
+        const size = list.reduce((a, n) => a + 4 + n.length, 0);
+        const data = new Uint8Array(size);
+        let o = 0;
+        for (const n of list) {
+          new DataView(data.buffer).setUint32(o, n.length);
+          data.set(n, o + 4);
+          o += 4 + n.length;
+        }
+        return { data, key: pk[i][1].startsWith('K'), ts: Math.round(Number(pk[i][0]) * 1e6) };
+      });
+      const t0 = Math.min(...chunks.map((c) => c.ts));
+      for (const c of chunks) c.ts -= t0;
+      assert(chunks.some((c, i) => i && c.ts < chunks[i - 1].ts), 'the reference has B-frames (out of display order)');
+      const { samples, mediaTime } = upscaleSamples(chunks, 3000);
+      assert(mediaTime > 0, 'a delay for the B-frames');
+      const r = muxMp4({ width: 160, height: 120, timescale: VIDEO_TIMESCALE, sps, pps, samples, mediaTime });
+      const out = path.join(OUT_DIR, 'bframes_ours.mp4');
+      fs.writeFileSync(out, Buffer.concat(r.parts.map((a) => Buffer.from(a.buffer, a.byteOffset, a.byteLength))));
+      const warn = spawnSync('ffmpeg', ['-hide_banner', '-v', 'warning', '-i', out, '-f', 'null', '-']);
+      assert(warn.status === 0 && warn.stderr.toString().trim() === '', `ffmpeg: ${warn.stderr}`);
+      // The pictures, in display order, are the same as the reference file.
+      const raw = (f) => spawnSync('ffmpeg', ['-v', 'error', '-i', f, '-f', 'rawvideo', '-pix_fmt', 'yuv420p', '-'], { maxBuffer: 1 << 28 }).stdout;
+      assert(Buffer.compare(raw(out), raw(ref)) === 0, 'the pictures differ from the reference');
+      // The display times: from 0, one frame each 1/30 s, in display order.
+      const times = spawnSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'frame=pts_time', '-of', 'csv=p=0', out])
+        .stdout.toString().trim().split('\n').map(Number);
+      assert(times.length === 40 && times.every((t, i) => Math.abs(t - i / 30) < 0.002), `display times ${times.slice(0, 6)}`);
+      // In display order already (as on Android): no ctts, no edit list.
+      const plain = upscaleSamples(chunks.slice().sort((a, b) => a.ts - b.ts).slice(0, 5).map((c, i) => ({ ...c, ts: i * 33333 })), 3000);
+      assert(plain.mediaTime === 0 && plain.samples.every((s) => s.cto === 0), 'ordered chunks: no offsets');
     },
   },
 ];

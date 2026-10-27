@@ -85,18 +85,27 @@ export async function upscaleExport(workerSrc, params, config, frames, opts = {}
   }
   if (!chunks.length || !avcc) throw new Error('The encoder gave no output');
 
-  // Durations from rounded absolute times, as in Original mode (plan §9.2 step 4).
-  const samples = [];
-  let last = null;
-  for (const c of chunks) {
-    const t = Math.round((c.ts * 9) / 100);
-    if (last) {
-      if (t <= last.t) throw new Error('The encoder output is not in display order');
-      last.duration = t - last.t;
-    }
-    last = { data: c.data, size: c.data.length, key: c.key, t, duration: 0 };
-    samples.push(last);
+  const { samples, mediaTime } = upscaleSamples(chunks, Math.round(VIDEO_TIMESCALE / params.fps));
+  return muxMp4({ width: config.outW, height: config.outH, timescale: VIDEO_TIMESCALE, avcc, samples, mediaTime });
+}
+
+// The MP4 samples of the encoder chunks (decode order). Times from rounded absolute times, as in
+// Original mode (plan §9.2 step 4). An encoder with B-frames (for example on desktop computers) gives
+// the chunks out of display order: then the decode times are the display times in order, and each
+// sample gets a composition offset (display - decode, made >= 0 by the delay mediaTime).
+// lastDuration: the display time of the last picture.
+export function upscaleSamples(chunks, lastDuration) {
+  const pts = chunks.map((c) => Math.round((c.ts * 9) / 100));
+  const sorted = pts.slice().sort((a, b) => a - b);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === sorted[i - 1]) throw new Error('The encoder gave two pictures with the same time');
   }
-  last.duration = Math.round(VIDEO_TIMESCALE / params.fps);
-  return muxMp4({ width: config.outW, height: config.outH, timescale: VIDEO_TIMESCALE, avcc, samples });
+  let mediaTime = 0;
+  for (let i = 0; i < pts.length; i++) mediaTime = Math.max(mediaTime, sorted[i] - pts[i]);
+  const samples = chunks.map((c, i) => ({
+    data: c.data, size: c.data.length, key: c.key,
+    duration: i + 1 < sorted.length ? sorted[i + 1] - sorted[i] : lastDuration,
+    cto: pts[i] - sorted[i] + mediaTime,
+  }));
+  return { samples, mediaTime };
 }
