@@ -104,6 +104,26 @@ function stts(durations) {
   return fullBox('stts', 0, 0, b);
 }
 
+// Composition offsets (ctts version 0): display time - decode time of each sample, for an encoder
+// with B-frames (frames in decode order, not display order). Only the Upscale export needs it.
+function ctts(offsets) {
+  const runs = [];
+  for (const o of offsets) {
+    const last = runs[runs.length - 1];
+    if (last && last[1] === o) last[0]++;
+    else runs.push([1, o]);
+  }
+  const b = new Bytes().u32(runs.length);
+  for (const [n, o] of runs) b.u32(n).u32(o);
+  return fullBox('ctts', 0, 0, b);
+}
+
+// Edit list: the presentation starts at mediaTime (the delay that the composition offsets add), so
+// the first picture shows at time 0.
+function edts(movieDur, mediaTime) {
+  return box('edts', fullBox('elst', 0, 0, new Bytes().u32(1).u32(movieDur).u32(mediaTime).u16(1).u16(0)));
+}
+
 function stss(keys) {
   const b = new Bytes().u32(keys.length);
   for (const k of keys) b.u32(k);
@@ -133,7 +153,10 @@ function chunkOffsets(offsets, use64) {
 }
 
 // Make the MP4 file.
-// video = { width, height, timescale, sps, pps, samples: [{ data: Uint8Array | Blob, size, duration, key }] }
+// video = { width, height, timescale, sps, pps, samples: [{ data: Uint8Array | Blob, size, duration, key, cto }] }
+// The samples are in decode order. duration: the decode time to the next sample. cto (optional): the
+// composition offset (display time - decode time, >= 0). video.mediaTime: the edit list start (the
+// largest delay), when the samples have composition offsets.
 // opts.chunkDuration: chunk length in timescale units (default 1 s).
 // opts.forceCo64, opts.forceLargeMdat: for tests only.
 // Returns { parts, size }. parts: Uint8Array headers and the sample data, in file order.
@@ -171,6 +194,7 @@ export function muxMp4(video, opts = {}) {
   const durations = samples.map((s) => s.duration);
   const totalDur = durations.reduce((a, b) => a + b, 0);
   const movieDur = Math.round((totalDur * MOVIE_TIMESCALE) / ts);
+  const reordered = samples.some((s) => s.cto);
   const keys = [];
   samples.forEach((s, i) => s.key && keys.push(i + 1));
   if (keys[0] !== 1) throw new Error('The first sample must be a sync sample');
@@ -182,11 +206,13 @@ export function muxMp4(video, opts = {}) {
     const make = () => {
       const stbl = box('stbl',
         fullBox('stsd', 0, 0, new Bytes().u32(1), avc1(video)),
-        stts(durations), stss(keys), stsc(chunkSizes), stsz(samples.map((s) => s.size)),
+        stts(durations), ...(reordered ? [ctts(samples.map((s) => s.cto || 0))] : []),
+        stss(keys), stsc(chunkSizes), stsz(samples.map((s) => s.size)),
         chunkOffsets(offsets, use64));
       const minf = box('minf', fullBox('vmhd', 0, 1, new Bytes().zeros(8)), dinf(), stbl);
       const mdia = box('mdia', mdhd(ts, totalDur), hdlr('vide', 'neomosh video'), minf);
-      const trak = box('trak', tkhd(1, movieDur, video.width, video.height, false), mdia);
+      const trak = box('trak', tkhd(1, movieDur, video.width, video.height, false),
+        ...(reordered ? [edts(movieDur, video.mediaTime || 0)] : []), mdia);
       return box('moov', mvhd(movieDur, 2), trak);
     };
     let moov = make();
