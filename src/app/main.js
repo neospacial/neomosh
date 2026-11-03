@@ -6,7 +6,7 @@ import { upscaleConfig, upscaleExport } from './upscale.js';
 import { selfTest, timelineCheck } from './selftest.js';
 import { sessionSize, fileStamp, formatTime } from './geometry.js';
 import { Store } from './store.js';
-import { Recorder, ST } from './recorder.js';
+import { Recorder, ST, prepareKernels } from './recorder.js';
 import { DEFAULT_SETTINGS, checkSettings } from '../codec/encoder.js';
 import { Player } from './player.js';
 
@@ -38,6 +38,9 @@ const el = {
 // Debug options in the address: #debug (the self-test), capture=yuv|bitmap|draw (the crop way of the
 // capture worker, D22). Example: #debug&capture=yuv
 const HASH = new URLSearchParams(location.hash.slice(1));
+
+// D30: compile the WebAssembly module now, once for all workers (it does not block the page).
+prepareKernels();
 
 // Display and session preferences. Kept in localStorage (a per-viewer convenience only).
 const PREF_KEY = 'neomosh.prefs';
@@ -606,11 +609,13 @@ function updatePill() {
   el.clipLbl.textContent = rec.clip ? '· clip ' + rec.clip : '';
 }
 
+// bitmap: an ImageBitmap, or a VideoFrame (D31: the GPU converts the colour when it is drawn).
 function onDecoded(bitmap) {
   const c = el.mosh;
-  if (c.width !== bitmap.width || c.height !== bitmap.height) {
-    c.width = bitmap.width;
-    c.height = bitmap.height;
+  const bw = bitmap.displayWidth || bitmap.width, bh = bitmap.displayHeight || bitmap.height;
+  if (c.width !== bw || c.height !== bh) {
+    c.width = bw;
+    c.height = bh;
   }
   c.getContext('2d').drawImage(bitmap, 0, 0);
   bitmap.close();
@@ -1071,7 +1076,7 @@ function updateSettingsSheet() {
       `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops; ` +
       `view skipped ${rec.viewSkips || 0}, the file has these frames). ` +
       `Frames: ${rec.frameCount}${rec.bloomFrames ? ` (bloom ${rec.bloomFrames} in this clip)` : ''}. ` +
-      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'file' ? 'file (each frame decoded, not real time)' : rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
+      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'file' ? `file (each frame decoded, not real time${rec.capMethod ? `; ${rec.capMethod}` : ''})` : rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }
@@ -1265,6 +1270,7 @@ async function runExport() {
   try {
     await rec.store.flush();
     const opts = {
+      blobChunk: 32 * 1048576, // D32: the data in Blobs of 32 MB, not all in RAM
       cuts: cutModes.slice(),
       smooth: expSmooth,
       signal: exportCtl.signal,

@@ -11,7 +11,10 @@ import { makeRef, allocRef, buildRef, buildHalf, predLuma, predChroma, sadLuma }
 import { rgbaToYuv420 } from './color.js';
 import { Kernels } from './wasm.js';
 import { Decoder } from './decoder.js';
-import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
+import {
+  predIntra16, predIntraChroma, intraResidual, reconIntra16, IntraResidual, sadBlock, dcScan, acScan,
+} from './intra.js';
+import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM, MB_INTRA } from './mvpred.js';
 import {
   MbResidual, reconInterMB, forward4x4, quant4x4, hadamard2x2, quantChromaDC,
 } from './transform.js';
@@ -245,6 +248,10 @@ export class Encoder {
       this.pcmInfo(mbx, mby);
       return;
     }
+    this.writePcmJs(bw, Y, U, V, mbx, mby, skipRun, mbType);
+  }
+
+  writePcmJs(bw, Y, U, V, mbx, mby, skipRun, mbType) {
     if (skipRun >= 0) bw.ue(skipRun);
     bw.ue(mbType);
     bw.alignZero();
@@ -288,13 +295,106 @@ export class Encoder {
     this.stats.pcm++;
   }
 
-  // I picture: all I_PCM (plan §6.5). The reconstruction equals the clamped source.
+  // I picture (D33): Intra 16x16 macroblocks (prediction from the decoded neighbours, the residual
+  // coded as in P pictures). debug.pcmI: all I_PCM, as before D33 (tests).
   encodeI(bw, Y, U, V) {
+    if (this.debug.pcmI) {
+      for (let mby = 0; mby < this.mbH; mby++) {
+        for (let mbx = 0; mbx < this.mbW; mbx++) this.writePcm(bw, Y, U, V, mbx, mby, -1, 25);
+      }
+      return;
+    }
+    if (this.k) {
+      // The kernels (kernels.c encode_i_frame): the same steps and bits as encodeIntraMB below.
+      this.k.x.encode_i_frame(this.info.I, Y.byteOffset, U.byteOffset, V.byteOffset,
+        this.recY.byteOffset, this.recU.byteOffset, this.recV.byteOffset, this.codedW, this.settings.qp);
+      this.stats.intra = this.numMbs;
+      return;
+    }
+    if (!this.ires) {
+      this.ires = new IntraResidual();
+      this.ipY = new Uint8Array(256);
+      this.ipU = new Uint8Array(64);
+      this.ipV = new Uint8Array(64);
+      this.itY = new Uint8Array(256);
+      this.itU = new Uint8Array(64);
+      this.itV = new Uint8Array(64);
+      this.iscan = new Int32Array(16);
+    }
+    const qp = this.settings.qp;
     for (let mby = 0; mby < this.mbH; mby++) {
-      for (let mbx = 0; mbx < this.mbW; mbx++) {
-        this.writePcm(bw, Y, U, V, mbx, mby, -1, 25);
+      for (let mbx = 0; mbx < this.mbW; mbx++) this.encodeIntraMB(bw, Y, U, V, mbx, mby, qp);
+    }
+  }
+
+  // One Intra 16x16 macroblock: the modes with the smallest SAD, the residual, the syntax, and the
+  // reconstruction (the same functions as the decoder).
+  encodeIntraMB(bw, Y, U, V, mbx, mby, qp) {
+    const W = this.codedW, cW = W >> 1, info = this.info, addr = mby * this.mbW + mbx;
+    const yOff = mby * 16 * W + mbx * 16, cOff = mby * 8 * cW + mbx * 8;
+    const R = this.recY, RU = this.recU, RV = this.recV;
+    let best = -1, bestSad = Infinity;
+    for (let m = 0; m < 4; m++) {
+      if (!predIntra16(R, W, mbx, mby, m, this.itY)) continue;
+      const s = sadBlock(Y, yOff, W, this.itY, 16);
+      if (s < bestSad) {
+        bestSad = s;
+        best = m;
+        this.ipY.set(this.itY);
       }
     }
+    let bestC = 0, bestCSad = Infinity;
+    for (let m = 0; m < 4; m++) {
+      if (!predIntraChroma(RU, cW, mbx, mby, m, this.itU)) continue;
+      predIntraChroma(RV, cW, mbx, mby, m, this.itV);
+      const s = sadBlock(U, cOff, cW, this.itU, 8) + sadBlock(V, cOff, cW, this.itV, 8);
+      if (s < bestCSad) {
+        bestCSad = s;
+        bestC = m;
+        this.ipU.set(this.itU);
+        this.ipV.set(this.itV);
+      }
+    }
+    const res = this.ires;
+    intraResidual(res, qp, Y, U, V, yOff, W, cOff, cW, this.ipY, this.ipU, this.ipV);
+    // mb_type 1..24 = 1 + mode + 4 * cbp chroma + 12 * (cbp luma 15), then the chroma mode, mb_qp_delta.
+    bw.ue(1 + best + 4 * res.cbpC + (res.cbpL ? 12 : 0));
+    bw.ue(bestC);
+    bw.se(0);
+    info.type[addr] = MB_INTRA;
+    info.mvx[addr] = 0;
+    info.mvy[addr] = 0;
+    info.nzLuma.fill(0, addr * 16, addr * 16 + 16);
+    info.nzCb.fill(0, addr * 4, addr * 4 + 4);
+    info.nzCr.fill(0, addr * 4, addr * 4 + 4);
+    const sc = this.iscan;
+    dcScan(res.dc, sc);
+    writeResidualBlock(bw, sc, 16, lumaNC(info, addr, mbx, mby, this.mbW, 0, 0));
+    if (res.cbpL) {
+      for (let b8 = 0; b8 < 4; b8++) {
+        for (let b4 = 0; b4 < 4; b4++) {
+          const bx = (b8 & 1) * 2 + (b4 & 1), by = (b8 >> 1) * 2 + (b4 >> 1), b = by * 4 + bx;
+          acScan(res.ac, b, sc);
+          writeResidualBlock(bw, sc, 15, lumaNC(info, addr, mbx, mby, this.mbW, bx, by));
+          info.nzLuma[addr * 16 + b] = res.nzAC[b];
+        }
+      }
+    }
+    if (res.cbpC) {
+      for (let comp = 0; comp < 2; comp++) writeResidualBlock(bw, comp ? res.crDC : res.cbDC, 4, -1);
+    }
+    if (res.cbpC === 2) {
+      for (let comp = 0; comp < 2; comp++) {
+        const nz = comp ? info.nzCr : info.nzCb, ac = comp ? res.cr : res.cb;
+        for (let b = 0; b < 4; b++) {
+          acScan(ac, b, sc);
+          writeResidualBlock(bw, sc, 15, chromaNC(nz, addr, mbx, mby, this.mbW, b & 1, b >> 1));
+          nz[addr * 4 + b] = (comp ? res.nzCr : res.nzCb)[b];
+        }
+      }
+    }
+    reconIntra16(res, qp, this.ipY, this.ipU, this.ipV, R, yOff, W, RU, RV, cOff, cW);
+    this.stats.intra = (this.stats.intra || 0) + 1;
   }
 
   predict(mbx, mby, mvx, mvy) {

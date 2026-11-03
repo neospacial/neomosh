@@ -5,6 +5,7 @@
 export const MB_SKIP = 0;
 export const MB_INTER = 1;
 export const MB_PCM = 2;
+export const MB_INTRA = 3; // Intra 16x16 (D33)
 
 export function makeMbInfo(numMbs) {
   return {
@@ -38,7 +39,7 @@ export function allocMbInfo(k, numMbs, mbW, mbH) {
 const nb = new Int32Array(9); // refA, mvA.x, mvA.y, refB, ..., refC, ...
 
 function loadNeighbor(info, addr, avail, k) {
-  if (!avail || info.type[addr] === MB_PCM) {
+  if (!avail || info.type[addr] === MB_PCM || info.type[addr] === MB_INTRA) {
     nb[k] = -1;
     nb[k + 1] = 0;
     nb[k + 2] = 0;

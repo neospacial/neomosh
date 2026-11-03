@@ -5,6 +5,7 @@
 
 import { Encoder } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
+import { setKernelsModule } from '../codec/wasm.js';
 import { coverCrop } from './geometry.js';
 import { FrameGate, SourceGaps } from './capture.js';
 import { CamYuv } from './camyuv.js';
@@ -34,6 +35,37 @@ function decodedBitmap() {
   if (!img || img.data.buffer !== rgba.buffer) img = new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.length), w, h);
   ctx.putImageData(img, 0, 0);
   return canvas.transferToImageBitmap();
+}
+
+// D31: the decoded picture as an I420 VideoFrame (visible size). The page draws it, and the GPU does the
+// YUV to RGB conversion: no conversion in the kernels, no putImageData. The planes are next to each
+// other in the decoder memory, so the frame is made from one view (VideoFrame copies it). Returns null
+// when the browser cannot make it (then the bitmap way).
+let frameOk = typeof VideoFrame === 'function';
+function decodedFrame() {
+  if (!frameOk) return null;
+  try {
+    const { Y, U, V } = dec;
+    const cw = dec.codedW, n = Y.length, cn = U.length;
+    let data;
+    if (Y.buffer === V.buffer && U.byteOffset === Y.byteOffset + n && V.byteOffset === U.byteOffset + cn) {
+      data = new Uint8Array(Y.buffer, Y.byteOffset, n + 2 * cn);
+    } else {
+      data = new Uint8Array(n + 2 * cn);
+      data.set(Y);
+      data.set(U, n);
+      data.set(V, n + cn);
+    }
+    return new VideoFrame(data, {
+      format: 'I420', codedWidth: cw, codedHeight: dec.codedH, timestamp: 0,
+      visibleRect: { x: 0, y: 0, width: w, height: h },
+      layout: [{ offset: 0, stride: cw }, { offset: n, stride: cw >> 1 }, { offset: n + cn, stride: cw >> 1 }],
+      colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false },
+    });
+  } catch {
+    frameOk = false;
+    return null;
+  }
 }
 
 // Compile the hot code paths before the first real frame, so that the first frames are not dropped.
@@ -127,11 +159,13 @@ async function canvasPicture(frame, c, mirror, method) {
    busy, it waits: no frame is dropped. The frame times come from the file (media time), so the export
    has the speed of the file, at any decode speed. */
 let fileDemux = null; // { key, d } for the last file
+let fileYuv = { ok: undefined, tries: 0, text: '' }; // D34: the YUV way for this file (checked once)
 
 async function fileInfo(file) {
   const key = `${file.name}|${file.size}|${file.lastModified}`;
   if (fileDemux && fileDemux.key === key) return fileDemux.d;
   const d = await demuxMp4(file);
+  fileYuv = { ok: undefined, tries: 0, text: '' }; // a new file: check its colours again
   let ok = false;
   if (d && typeof VideoDecoder === 'function') {
     try {
@@ -221,15 +255,47 @@ async function fileClip(m, run) {
       const turned = d.rotation % 180 !== 0;
       const c = coverCrop(turned ? fh : fw, turned ? fw : fh, w, h);
       const t = turnedCrop(d.rotation, fw, fh, c, w, h);
-      ctx.setTransform(...t.m);
-      ctx.drawImage(frame, t.sx, t.sy, t.sw, t.sh, 0, 0, t.dw, t.dh);
+      const draw = () => {
+        ctx.setTransform(...t.m);
+        ctx.drawImage(frame, t.sx, t.sy, t.sw, t.sh, 0, 0, t.dw, t.dh);
+        return ctx.getImageData(0, 0, w, h).data;
+      };
+      // D34: the YUV way (copy, scale, turn, colour in the kernels), when the frame can be read and
+      // its colours were checked once against the canvas way; else the canvas way.
+      let msg = null;
+      if (cap.yuv && CamYuv.usable(frame) && fileYuv.ok !== false) {
+        let planes = null;
+        try {
+          planes = await cap.yuv.convert(frame, { sx: t.sx, sy: t.sy, sw: t.sw, sh: t.sh }, false, d.rotation);
+        } catch {
+          fileYuv.ok = false;
+        }
+        if (planes && fileYuv.ok === undefined) {
+          const rgba = draw();
+          const cal = cap.yuv.calibrate(rgba, planes);
+          if (cal) {
+            fileYuv.ok = cal.y < 3 && cal.u < 3 && cal.v < 3;
+            fileYuv.text = `${fileYuv.ok ? 'yuv' : 'canvas'}; yuv check Y ${cal.y.toFixed(1)}, U ${cal.u.toFixed(1)}, V ${cal.v.toFixed(1)}`;
+          } else if (++fileYuv.tries >= 10) {
+            fileYuv.ok = false;
+            fileYuv.text = 'canvas; no clear frame for the yuv check';
+          }
+          if (fileYuv.ok !== undefined) self.postMessage({ cmd: 'fileMethod', text: fileYuv.text });
+          if (fileYuv.ok !== true) {
+            planes = null;
+            msg = { cmd: 'rgba', rgba };
+          }
+        }
+        if (planes) msg = { cmd: 'planes', Y: planes[0], U: planes[1], V: planes[2] };
+      }
+      if (!msg) msg = { cmd: 'rgba', rgba: draw() };
       frame.close();
-      const rgba = ctx.getImageData(0, 0, w, h).data;
       cap.inFlight++;
       sent++;
       lastUs = us;
       const ms = performance.now() - t0;
-      cap.port.postMessage({ cmd: 'rgba', rgba, tsUs: m.sessionEndUs + (us - start), seq: seq++, grabMs: ms }, [rgba.buffer]);
+      Object.assign(msg, { tsUs: m.sessionEndUs + (us - start), seq: seq++, grabMs: ms });
+      cap.port.postMessage(msg, msg.rgba ? [msg.rgba.buffer] : [msg.Y.buffer]);
       if (performance.now() - lastPost > 200) {
         lastPost = performance.now();
         self.postMessage({ cmd: 'fileTime', us, durationUs: d.durationUs });
@@ -290,9 +356,16 @@ async function captureClip(m, run) {
           break;
         }
       }
-      // Probe (before the recording): only measure the ways, then stop. No gate, no encoder.
-      if (cap.probe) {
-        if (cap.method || ++cap.probeFrames > 80) break;
+      // Probe (before the recording): only measure the ways, then stop. No gate, no encoder. At the end
+      // the page stops the track; the frames still in the stream are closed above until it ends (a
+      // cancel would drop them without close()).
+      if (cap.probe && (cap.method || ++cap.probeFrames > 80)) {
+        cap.run++;
+        frame.close();
+        if (!cap.method) self.postMessage({ cmd: 'probeEnd' });
+        if (cap.track) cap.track.stop(); // Safari: the track is in this worker
+        armQuietCancel(reader);
+        continue;
       }
       const t = frame.timestamp / 1000;
       // A gap in the source times: when this worker waited for the frame, the camera did not give the
@@ -472,11 +545,25 @@ const handlers = {
     enc.setSettings(m.settings);
   },
 
-  // Decoder. preview: make a bitmap for the viewfinder (R-21: the main thread skips it when late).
+  // Decoder. preview: make a picture for the viewfinder (R-21: the main thread skips it when late).
+  // gpu (D31): the live view takes a VideoFrame (the GPU converts the colour); the others an exact bitmap.
   packet(m) {
     const t0 = performance.now();
     const changed = dec.decodePacket(m.pkt, !!m.show);
-    const bitmap = changed && m.preview ? decodedBitmap() : null;
+    let bitmap = null;
+    if (changed && m.preview) {
+      const vf = m.gpu ? decodedFrame() : null;
+      if (vf) {
+        try {
+          self.postMessage({ cmd: 'decoded', seq: m.seq, bitmap: vf, ms: performance.now() - t0 }, [vf]);
+          return;
+        } catch {
+          vf.close();
+          frameOk = false; // a VideoFrame cannot go to the page here: bitmaps from now on
+        }
+      }
+      bitmap = decodedBitmap();
+    }
     self.postMessage({ cmd: 'decoded', seq: m.seq, bitmap, ms: performance.now() - t0 }, bitmap ? [bitmap] : []);
   },
   // The reference picture (plan §8.4 step 4) and a bitmap of it.
@@ -548,8 +635,22 @@ async function upFrame(m) {
   self.postMessage({ cmd: 'upAck' });
 }
 
+// D30: the messages wait for the compiled module from the page (the first message, 'kernels').
+let kernelsSet = false;
+const waiting = [];
+
 self.onmessage = (e) => {
-  const m = e.data;
+  if (e.data.cmd === 'kernels') {
+    setKernelsModule(e.data.module);
+    kernelsSet = true;
+    for (const m of waiting.splice(0)) run(m);
+    return;
+  }
+  if (!kernelsSet) waiting.push(e.data);
+  else run(e.data);
+};
+
+function run(m) {
   const fail = (err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: m.cmd });
   try {
     const r = handlers[m.cmd](m);
@@ -557,4 +658,4 @@ self.onmessage = (e) => {
   } catch (err) {
     fail(err);
   }
-};
+}

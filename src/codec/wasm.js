@@ -14,12 +14,36 @@ export function setWasmEnabled(on) {
   enabled = on;
 }
 
+// The bytes of the module (base64 in the file set). Empty in a bundle without them (the app workers:
+// they get the compiled module from the page, see setKernelsModule).
+function wasmBytes() {
+  return KERNELS_WASM ? Uint8Array.from(atob(KERNELS_WASM), (c) => c.charCodeAt(0)) : null;
+}
+
+// The page compiles the module once, without blocking (D30), and gives it to each worker. Resolves the
+// module, or null (no WebAssembly SIMD: the codec uses the JavaScript functions).
+export async function compileKernels() {
+  try {
+    const bin = wasmBytes();
+    if (!bin || typeof WebAssembly !== 'object' || !WebAssembly.validate(bin)) return null;
+    compiled = await WebAssembly.compile(bin);
+  } catch {
+    compiled = null;
+  }
+  return compiled;
+}
+
+// A worker: the module from the page (null: none).
+export function setKernelsModule(m) {
+  compiled = m || null;
+}
+
 function wasmModule() {
   if (compiled !== undefined) return compiled;
   compiled = null;
   try {
-    const bin = Uint8Array.from(atob(KERNELS_WASM), (c) => c.charCodeAt(0));
-    if (typeof WebAssembly === 'object' && WebAssembly.validate(bin)) compiled = new WebAssembly.Module(bin);
+    const bin = wasmBytes();
+    if (bin && typeof WebAssembly === 'object' && WebAssembly.validate(bin)) compiled = new WebAssembly.Module(bin);
   } catch {
     compiled = null; // for example a synchronous compile on a browser main thread
   }

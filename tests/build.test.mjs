@@ -7,6 +7,17 @@ import { assert } from './lib/session.mjs';
 
 export const tests = [
   {
+    name: 'D30: the app page has the WebAssembly bytes once (for the page), the worker code has none',
+    fn() {
+      const html = buildPage(PAGES[0][0]);
+      const b64 = /KERNELS_WASM = '([A-Za-z0-9+/=]{1000,})'/g;
+      assert([...html.matchAll(b64)].length === 1, 'the bytes must be in the page once');
+      const worker = JSON.parse(html.match(/const WORKER_SRC = (".*?");\n/s)[1]);
+      assert(!/[A-Za-z0-9+/]{4000,}/.test(worker), 'the worker code must not have the bytes');
+      assert(/setKernelsModule/.test(worker), 'the worker takes the module from the page');
+    },
+  },
+  {
     name: 'index.html (GitHub Pages) and dist are the same as a new build',
     fn() {
       const html = buildPage(PAGES[0][0]);

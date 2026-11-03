@@ -46,7 +46,8 @@ export class CamYuv {
     this.out = k.alloc(n * 3 / 2);
     this.tmp = k.alloc(n * 3 / 2 + w * h * 4); // calibration: RGBA and its YUV
     this.M = k.alloc(40);
-    this.scratch = k.alloc(4 * (4 * w + 2 * w + 2 * w));
+    this.scratch = k.alloc(4 * 8 * Math.max(w, h)); // a turned picture is scaled h x w first
+    this.turnBuf = 0; // D34: the picture before it is turned
     this.src = 0;
     this.srcSize = 0;
     this.csKey = null;
@@ -62,10 +63,13 @@ export class CamYuv {
     return { x, y, width: Math.max(2, c.sw & ~1), height: Math.max(2, c.sh & ~1) };
   }
 
-  // frame: a camera VideoFrame. c: the crop (coverCrop). Returns [Y, U, V] (coded size, new arrays).
-  async convert(frame, c, mirror) {
+  // frame: a camera VideoFrame (or a decoded file frame). c: the crop in the frame (coverCrop, or
+  // demux.js turnedCrop for a file). rotation (D34): 90, 180, or 270 turns the picture clockwise, the
+  // way a player shows the file. Returns [Y, U, V] (coded size, new arrays).
+  async convert(frame, c, mirror, rotation = 0) {
     const k = this.k;
-    const rect = CamYuv.rect(c);
+    const vr = frame.visibleRect || { x: 0, y: 0 };
+    const rect = CamYuv.rect({ ...c, sx: c.sx + vr.x, sy: c.sy + vr.y }); // copyTo uses coded coordinates
     const size = frame.allocationSize({ rect });
     if (size > this.srcSize) {
       this.src = k.alloc(size);
@@ -82,9 +86,19 @@ export class CamYuv {
     const sy = this.src + layout[0].offset, su = this.src + layout[1].offset;
     const sv = nv12 ? su + 1 : this.src + layout[2].offset;
     const n = this.codedW * this.codedH, cn = n >> 2;
-    k.x.scale_yuv(sy, layout[0].stride, su, sv, layout[1].stride, nv12 ? 2 : 1, rect.width, rect.height,
-      this.out, this.out + n, this.out + n + cn, this.w, this.h, this.codedW, this.codedH, mirror ? 1 : 0,
-      this.M, this.scratch, this.half);
+    if (rotation) {
+      // Scale in the orientation of the frame (dw x dh), then turn into the coded planes.
+      const [dw, dh] = rotation === 180 ? [this.w, this.h] : [this.h, this.w];
+      if (!this.turnBuf) this.turnBuf = k.alloc(dw * dh * 1.5 + 64);
+      const t = this.turnBuf, tn = dw * dh;
+      k.x.scale_yuv(sy, layout[0].stride, su, sv, layout[1].stride, nv12 ? 2 : 1, rect.width, rect.height,
+        t, t + tn, t + tn + (tn >> 2), dw, dh, dw, dh, 0, this.M, this.scratch, this.half);
+      k.x.turn_yuv(t, t + tn, t + tn + (tn >> 2), dw, dh, rotation, this.out, this.out + n, this.out + n + cn, this.codedW, this.codedH);
+    } else {
+      k.x.scale_yuv(sy, layout[0].stride, su, sv, layout[1].stride, nv12 ? 2 : 1, rect.width, rect.height,
+        this.out, this.out + n, this.out + n + cn, this.w, this.h, this.codedW, this.codedH, mirror ? 1 : 0,
+        this.M, this.scratch, this.half);
+    }
     const all = k.u8(this.out, n + 2 * cn).slice();
     return [all.subarray(0, n), all.subarray(n, n + cn), all.subarray(n + cn)];
   }

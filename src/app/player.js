@@ -3,6 +3,8 @@
 // Seek uses checkpoints: the pause point references (IndexedDB), and decoder snapshots that the
 // player makes every 2 s during playback (RAM only).
 
+import { makeWorker } from './recorder.js';
+
 const SNAPSHOT_EVERY_US = 2e6;
 const MAX_SNAPSHOTS = 90;
 
@@ -28,9 +30,7 @@ export class Player {
     this.cur = { index: 0, tsUs: 0 }; // next frame to decode; time of the picture now
     this.playing = false;
     this.busy = Promise.resolve();
-    const url = URL.createObjectURL(new Blob([this.workerSrc], { type: 'text/javascript' }));
-    this.worker = new Worker(url);
-    URL.revokeObjectURL(url);
+    this.worker = makeWorker(this.workerSrc); // with the compiled module (D30)
     this.worker.onmessage = (e) => {
       const m = e.data;
       const key = m.cmd === 'snapshot' ? 's' + m.id : m.cmd === 'decoded' ? 'd' + m.seq : m.cmd;

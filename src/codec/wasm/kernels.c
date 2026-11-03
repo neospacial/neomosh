@@ -778,6 +778,29 @@ void scale_yuv(const u8 *sy, int sys, const u8 *su, const u8 *sv, int sus, int c
   pad_coded(V, cw, ch, cW, codedH >> 1);
 }
 
+/* D34: turn planar I420 planes (sw x sh, tight strides) by 90, 180, or 270 degrees clockwise, the way a
+   player shows a turned file (demux.js turnedCrop), into the coded planes, then pad them. */
+static void turn_plane(const u8 *s, int sw, int sh, int rot, u8 *d, int ds) {
+  if (rot == 90) {
+    for (int y = 0; y < sw; y++) for (int x = 0; x < sh; x++) d[y * ds + x] = s[(sh - 1 - x) * sw + y];
+  } else if (rot == 270) {
+    for (int y = 0; y < sw; y++) for (int x = 0; x < sh; x++) d[y * ds + x] = s[x * sw + (sw - 1 - y)];
+  } else {
+    for (int y = 0; y < sh; y++) for (int x = 0; x < sw; x++) d[y * ds + x] = s[(sh - 1 - y) * sw + (sw - 1 - x)];
+  }
+}
+
+EXPORT(turn_yuv)
+void turn_yuv(const u8 *sY, const u8 *sU, const u8 *sV, int sw, int sh, int rot, u8 *Y, u8 *U, u8 *V, int codedW, int codedH) {
+  const int w = rot == 180 ? sw : sh, h = rot == 180 ? sh : sw;
+  turn_plane(sY, sw, sh, rot, Y, codedW);
+  turn_plane(sU, sw >> 1, sh >> 1, rot, U, codedW >> 1);
+  turn_plane(sV, sw >> 1, sh >> 1, rot, V, codedW >> 1);
+  pad_coded(Y, w, h, codedW, codedH);
+  pad_coded(U, w >> 1, h >> 1, codedW >> 1, codedH >> 1);
+  pad_coded(V, w >> 1, h >> 1, codedW >> 1, codedH >> 1);
+}
+
 EXPORT(yuv420_to_rgba)
 void yuv420_to_rgba(const u8 *Y, const u8 *U, const u8 *V, int codedW, int w, int h, u8 *rgba) {
   const int cW = codedW >> 1;
@@ -1095,6 +1118,274 @@ static void set_info(i32 *I, int addr, int type, int mx, int my, int nz) {
   __builtin_memset(P8(I[INZL]) + addr * 16, nz, 16);
   __builtin_memset(P8(I[INZCB]) + addr * 4, nz, 4);
   __builtin_memset(P8(I[INZCR]) + addr * 4, nz, 4);
+}
+
+/* ---------------- I picture: Intra 16x16 (intra.js, encoder.js encodeIntraMB, D33) ----------------
+   The same steps and the same mode decision (SAD, the first smallest) as the JavaScript code, so the
+   bits are the same. */
+enum { MB_INTRA = 3 };
+
+static int pred_i16(const u8 *P, int W, int mbx, int mby, int mode, u8 *out) {
+  const int top = mby > 0, left = mbx > 0;
+  const u8 *o = P + mby * 16 * W + mbx * 16;
+  if (mode == 0) {
+    if (!top) return 0;
+    for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) out[y * 16 + x] = o[x - W];
+  } else if (mode == 1) {
+    if (!left) return 0;
+    for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) out[y * 16 + x] = o[y * W - 1];
+  } else if (mode == 2) {
+    int s = 0, v;
+    if (top) for (int x = 0; x < 16; x++) s += o[x - W];
+    if (left) for (int y = 0; y < 16; y++) s += o[y * W - 1];
+    v = top && left ? (s + 16) >> 5 : (top || left) ? (s + 8) >> 4 : 128;
+    for (int i = 0; i < 256; i++) out[i] = (u8)v;
+  } else {
+    if (!top || !left) return 0;
+    int H = 0, V = 0;
+    for (int i = 0; i < 8; i++) {
+      H += (i + 1) * (o[8 + i - W] - o[6 - i - W]);
+      V += (i + 1) * (o[(8 + i) * W - 1] - (6 - i < 0 ? o[-W - 1] : o[(6 - i) * W - 1]));
+    }
+    const int a = 16 * (o[15 * W - 1] + o[15 - W]), b = (5 * H + 32) >> 6, c = (5 * V + 32) >> 6;
+    for (int y = 0; y < 16; y++) for (int x = 0; x < 16; x++) out[y * 16 + x] = (u8)clip255((a + b * (x - 7) + c * (y - 7) + 16) >> 5);
+  }
+  return 1;
+}
+
+static int pred_ic(const u8 *P, int cW, int mbx, int mby, int mode, u8 *out) {
+  const int top = mby > 0, left = mbx > 0;
+  const u8 *o = P + mby * 8 * cW + mbx * 8;
+  if (mode == 0) {
+    for (int b = 0; b < 4; b++) {
+      const int xO = (b & 1) * 4, yO = (b >> 1) * 4;
+      int st = 0, sl = 0, v;
+      if (top) for (int x = 0; x < 4; x++) st += o[xO + x - cW];
+      if (left) for (int y = 0; y < 4; y++) sl += o[(yO + y) * cW - 1];
+      if ((xO == 0 && yO == 0) || (xO > 0 && yO > 0)) v = top && left ? (st + sl + 4) >> 3 : left ? (sl + 2) >> 2 : top ? (st + 2) >> 2 : 128;
+      else if (xO > 0) v = top ? (st + 2) >> 2 : left ? (sl + 2) >> 2 : 128;
+      else v = left ? (sl + 2) >> 2 : top ? (st + 2) >> 2 : 128;
+      for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) out[(yO + y) * 8 + xO + x] = (u8)v;
+    }
+  } else if (mode == 1) {
+    if (!left) return 0;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) out[y * 8 + x] = o[y * cW - 1];
+  } else if (mode == 2) {
+    if (!top) return 0;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) out[y * 8 + x] = o[x - cW];
+  } else {
+    if (!top || !left) return 0;
+    int H = 0, V = 0;
+    for (int i = 0; i < 4; i++) {
+      H += (i + 1) * (o[4 + i - cW] - o[2 - i - cW]);
+      V += (i + 1) * (o[(4 + i) * cW - 1] - (2 - i < 0 ? o[-cW - 1] : o[(2 - i) * cW - 1]));
+    }
+    const int a = 16 * (o[7 * cW - 1] + o[7 - cW]), b = (34 * H + 32) >> 6, c = (34 * V + 32) >> 6;
+    for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) out[y * 8 + x] = (u8)clip255((a + b * (x - 3) + c * (y - 3) + 16) >> 5);
+  }
+  return 1;
+}
+
+static int sad_n(const u8 *S, int stride, const u8 *pred, int n) {
+  int s = 0;
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      const int d = S[y * stride + x] - pred[y * n + x];
+      s += d < 0 ? -d : d;
+    }
+  }
+  return s;
+}
+
+static void fwd4x4_s(const int *r, int *w) {
+  int t[16];
+  for (int y = 0; y < 4; y++) {
+    const int *a = r + y * 4;
+    const int s03 = a[0] + a[3], d03 = a[0] - a[3], s12 = a[1] + a[2], d12 = a[1] - a[2];
+    t[y * 4] = s03 + s12;
+    t[y * 4 + 1] = 2 * d03 + d12;
+    t[y * 4 + 2] = s03 - s12;
+    t[y * 4 + 3] = d03 - 2 * d12;
+  }
+  for (int x = 0; x < 4; x++) {
+    const int a = t[x], b = t[4 + x], c = t[8 + x], d = t[12 + x];
+    const int s03 = a + d, d03 = a - d, s12 = b + c, d12 = b - c;
+    w[x] = s03 + s12;
+    w[4 + x] = 2 * d03 + d12;
+    w[8 + x] = s03 - s12;
+    w[12 + x] = d03 - 2 * d12;
+  }
+}
+
+static int quant_intra(const int *w, int qp, i32 *z, int first) {
+  const int qbits = 15 + qp / 6, f = (1 << qbits) / 3;
+  const int *mf = QUANT_MF[qp % 6];
+  int nz = 0;
+  if (first) z[0] = 0;
+  for (int i = first; i < 16; i++) {
+    const int v = w[i], a = v < 0 ? -v : v;
+    const int q = (a * mf[POS_CLASS[i]] + f) >> qbits;
+    z[i] = v < 0 ? -q : q;
+    if (q) nz++;
+  }
+  return nz;
+}
+
+static void hadamard4x4(const int *c, int *f) {
+  int t[16];
+  for (int i = 0; i < 4; i++) {
+    const int a = c[i * 4], b = c[i * 4 + 1], d = c[i * 4 + 2], e = c[i * 4 + 3];
+    t[i * 4] = a + b + d + e;
+    t[i * 4 + 1] = a + b - d - e;
+    t[i * 4 + 2] = a - b - d + e;
+    t[i * 4 + 3] = a - b + d - e;
+  }
+  for (int j = 0; j < 4; j++) {
+    const int a = t[j], b = t[4 + j], d = t[8 + j], e = t[12 + j];
+    f[j] = a + b + d + e;
+    f[4 + j] = a + b - d - e;
+    f[8 + j] = a - b - d + e;
+    f[12 + j] = a - b + d - e;
+  }
+}
+
+static i32 i_ac[256], i_cb[64], i_cr[64], i_dc[16], i_cbdc[4], i_crdc[4];
+static u8 i_pY[256], i_pU[64], i_pV[64], i_tY[256], i_tU[64], i_tV[64];
+
+static void encode_intra_mb(i32 *I, const u8 *sY, const u8 *sU, const u8 *sV, u8 *rY, u8 *rU, u8 *rV, int W, int mbx, int mby, int qp) {
+  const int cW = W >> 1, mbW = I[IMBW], addr = mby * mbW + mbx;
+  const int yOff = mby * 16 * W + mbx * 16, cOff = mby * 8 * cW + mbx * 8;
+  int best = -1, bestSad = 0x7fffffff;
+  for (int m = 0; m < 4; m++) {
+    if (!pred_i16(rY, W, mbx, mby, m, i_tY)) continue;
+    const int s = sad_n(sY + yOff, W, i_tY, 16);
+    if (s < bestSad) {
+      bestSad = s;
+      best = m;
+      __builtin_memcpy(i_pY, i_tY, 256);
+    }
+  }
+  int bestC = 0, bestCSad = 0x7fffffff;
+  for (int m = 0; m < 4; m++) {
+    if (!pred_ic(rU, cW, mbx, mby, m, i_tU)) continue;
+    pred_ic(rV, cW, mbx, mby, m, i_tV);
+    const int s = sad_n(sU + cOff, cW, i_tU, 8) + sad_n(sV + cOff, cW, i_tV, 8);
+    if (s < bestCSad) {
+      bestCSad = s;
+      bestC = m;
+      __builtin_memcpy(i_pU, i_tU, 64);
+      __builtin_memcpy(i_pV, i_tV, 64);
+    }
+  }
+  // The residual (intra.js intraResidual).
+  int blk[16], w4[16], wdc[16], nzAC[16], anyAC = 0;
+  for (int b = 0; b < 16; b++) {
+    const int bx = b & 3, by = b >> 2;
+    for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) blk[y * 4 + x] = sY[yOff + (by * 4 + y) * W + bx * 4 + x] - i_pY[(by * 4 + y) * 16 + bx * 4 + x];
+    fwd4x4_s(blk, w4);
+    wdc[b] = w4[0];
+    nzAC[b] = quant_intra(w4, qp, i_ac + b * 16, 1);
+    if (nzAC[b]) anyAC = 1;
+  }
+  int h[16];
+  hadamard4x4(wdc, h);
+  {
+    const int qbits = 15 + qp / 6, f = (1 << qbits) / 3, mf = QUANT_MF[qp % 6][0];
+    for (int i = 0; i < 16; i++) {
+      const int v = h[i] >> 1, a = v < 0 ? -v : v;
+      const int q = (a * mf + 2 * f) >> (qbits + 1);
+      i_dc[i] = v < 0 ? -q : q;
+    }
+  }
+  const int cbpL = anyAC ? 15 : 0;
+  const int qpc = CHROMA_QP[qp];
+  int cDC = 0, cAC = 0, nzC[2][4];
+  for (int comp = 0; comp < 2; comp++) {
+    const u8 *S = comp ? sV : sU;
+    const u8 *pred = comp ? i_pV : i_pU;
+    i32 *ac = comp ? i_cr : i_cb;
+    int dcs[4];
+    for (int b = 0; b < 4; b++) {
+      const int bx = b & 1, by = b >> 1;
+      for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++) blk[y * 4 + x] = S[cOff + (by * 4 + y) * cW + bx * 4 + x] - pred[(by * 4 + y) * 8 + bx * 4 + x];
+      fwd4x4_s(blk, w4);
+      dcs[b] = w4[0];
+      nzC[comp][b] = quant_intra(w4, qpc, ac + b * 16, 1);
+      if (nzC[comp][b]) cAC = 1;
+    }
+    int f2[4];
+    hadamard2x2(dcs, f2);
+    if (quant_chroma_dc(f2, qpc, comp ? i_crdc : i_cbdc)) cDC = 1;
+  }
+  const int cbpC = cAC ? 2 : cDC ? 1 : 0;
+  // The syntax (encoder.js encodeIntraMB).
+  put_ue((unsigned)(1 + best + 4 * cbpC + (cbpL ? 12 : 0)));
+  put_ue((unsigned)bestC);
+  put_se(0);
+  u8 *nzL = P8(I[INZL]), *nzCb = P8(I[INZCB]), *nzCr = P8(I[INZCR]);
+  set_info(I, addr, MB_INTRA, 0, 0, 0);
+  int scan[16];
+  for (int i = 0; i < 16; i++) scan[i] = i_dc[ZIGZAG4x4[i]];
+  write_block(scan, 16, luma_nc(nzL, addr, mbx, mby, mbW, 0, 0));
+  if (cbpL) {
+    for (int b8 = 0; b8 < 4; b8++) {
+      for (int b4 = 0; b4 < 4; b4++) {
+        const int bx = (b8 & 1) * 2 + (b4 & 1), by = (b8 >> 1) * 2 + (b4 >> 1), b = by * 4 + bx;
+        for (int i = 0; i < 15; i++) scan[i] = i_ac[b * 16 + ZIGZAG4x4[i + 1]];
+        write_block(scan, 15, luma_nc(nzL, addr, mbx, mby, mbW, bx, by));
+        nzL[addr * 16 + b] = (u8)nzAC[b];
+      }
+    }
+  }
+  if (cbpC) {
+    write_block(i_cbdc, 4, -1);
+    write_block(i_crdc, 4, -1);
+  }
+  if (cbpC == 2) {
+    for (int comp = 0; comp < 2; comp++) {
+      u8 *nz = comp ? nzCr : nzCb;
+      const i32 *ac = comp ? i_cr : i_cb;
+      for (int b = 0; b < 4; b++) {
+        for (int i = 0; i < 15; i++) scan[i] = ac[b * 16 + ZIGZAG4x4[i + 1]];
+        write_block(scan, 15, chroma_nc(nz, addr, mbx, mby, mbW, b & 1, b >> 1));
+        nz[addr * 4 + b] = (u8)nzC[comp][b];
+      }
+    }
+  }
+  // The reconstruction (intra.js reconIntra16).
+  {
+    int f[16], dcY[16];
+    hadamard4x4(i_dc, f);
+    const int ls = 16 * DEQUANT_V[qp % 6][0], q6 = qp / 6;
+    for (int i = 0; i < 16; i++) dcY[i] = qp >= 36 ? (f[i] * ls) << (q6 - 6) : (f[i] * ls + (1 << (5 - q6))) >> (6 - q6);
+    for (int b = 0; b < 16; b++) {
+      const int bx = b & 3, by = b >> 2;
+      recon4x4_v(i_ac + b * 16, qp, 1, dcY[b], !cbpL, i_pY + by * 64 + bx * 4, 16, rY + yOff + by * 4 * W + bx * 4, W);
+    }
+  }
+  for (int comp = 0; comp < 2; comp++) {
+    const u8 *pred = comp ? i_pV : i_pU;
+    u8 *P = (comp ? rV : rU) + cOff;
+    if (!cbpC) {
+      for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) P[y * cW + x] = pred[y * 8 + x];
+      continue;
+    }
+    int dcOut[4];
+    dequant_chroma_dc(comp ? i_crdc : i_cbdc, qpc, dcOut);
+    const i32 *ac = comp ? i_cr : i_cb;
+    for (int b = 0; b < 4; b++) {
+      const int bx = b & 1, by = b >> 1;
+      recon4x4_v(ac + b * 16, qpc, 1, dcOut[b], cbpC != 2, pred + by * 32 + bx * 4, 8, P + by * 4 * cW + bx * 4, cW);
+    }
+  }
+}
+
+// All macroblocks of an I picture (the writer must be set: bw_reset).
+EXPORT(encode_i_frame)
+void encode_i_frame(i32 *I, const u8 *sY, const u8 *sU, const u8 *sV, u8 *rY, u8 *rU, u8 *rV, int W, int qp) {
+  for (int mby = 0; mby < I[IMBH]; mby++) {
+    for (int mbx = 0; mbx < I[IMBW]; mbx++) encode_intra_mb(I, sY, sU, sV, rY, rU, rV, W, mbx, mby, qp);
+  }
 }
 
 /* ---------------- P picture encoder loop (encoder.js encodeP) ----------------
