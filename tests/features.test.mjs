@@ -116,4 +116,144 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'rear cameras (D28): lens chips, the selected lens opens, locked while recording; Android labels are numbers',
+    async fn() {
+      if (!chromium) return skip();
+      // Three rear cameras (iPhone labels) and a front camera. Each opens the fake camera, and its
+      // track reports the deviceId that was asked for.
+      const init = () => {
+        const labels = window.__labels || ['Back Camera', 'Back Ultra Wide Camera', 'Back Telephoto Camera', 'Back Dual Wide Camera', 'Front Camera'];
+        const md = navigator.mediaDevices;
+        const gum = md.getUserMedia.bind(md);
+        window.__asked = [];
+        md.enumerateDevices = async () => labels.map((label, i) => ({ kind: 'videoinput', deviceId: `cam${i}`, groupId: 'g', label }));
+        md.getUserMedia = async (c) => {
+          const v = c.video || {};
+          const id = v.deviceId && v.deviceId.exact ? v.deviceId.exact : 'cam0';
+          window.__asked.push(id);
+          const s = await gum({ video: { width: v.width, height: v.height }, audio: false });
+          const t = s.getVideoTracks()[0];
+          const gs = t.getSettings.bind(t);
+          t.getSettings = () => ({ ...gs(), deviceId: id });
+          return s;
+        };
+      };
+      const h = await openApp('lenses', { init });
+      try {
+        const { page } = h;
+        await h.start();
+        await page.waitForSelector('#lensBar:not([hidden])');
+        const chips = () => page.$$eval('#lensBar button', (b) => b.map((x) => x.textContent + (x.classList.contains('active') ? '*' : '')).join(' '));
+        assert(await chips() === '0.5× 1×* Tele', `iPhone lenses: ${await chips()}`);
+        await page.click('#lensBar button:nth-child(3)');
+        await page.waitForFunction(() => document.querySelector('#lensBar button.active') && document.querySelector('#lensBar button.active').textContent === 'Tele');
+        assert((await page.evaluate(() => window.__asked)).slice(-1)[0] === 'cam2', 'the telephoto camera was asked for');
+        const ready = () => page.waitForFunction(() => {
+          const v = document.getElementById('preview');
+          return v.readyState >= 2 && v.videoWidth > 0 && !document.getElementById('shutter').disabled;
+        });
+        await ready();
+        await page.click('#shutter');
+        await h.waitState('recording');
+        assert(await page.$eval('#lensBar', (e) => e.hidden), 'no lens change while recording');
+        await page.waitForTimeout(800);
+        await page.click('#shutter');
+        await h.waitState('paused');
+        assert(!(await page.$eval('#lensBar', (e) => e.hidden)), 'the lenses show again while paused');
+        await page.click('#lensBar button:nth-child(1)');
+        await page.waitForFunction(() => document.querySelector('#lensBar button.active').textContent === '0.5×');
+        await ready();
+        await h.clip(800);
+        const db = await h.db();
+        assert(db.frames.length > 20 && db.points.length === 3, 'two clips with two lenses');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+      // Android labels: numbers, in the order of the list.
+      const android = `window.__labels = ['camera2 0, facing back', 'camera2 1, facing front', 'camera2 2, facing back', 'camera2 3, facing back'];(${init.toString()})();`;
+      const h2 = await openApp('lenses2', { init: android });
+      try {
+        await h2.start();
+        await h2.page.waitForSelector('#lensBar:not([hidden])');
+        const c2 = await h2.page.$$eval('#lensBar button', (b) => b.map((x) => x.textContent + (x.classList.contains('active') ? '*' : '')).join(' '));
+        assert(c2 === '1* 2 3', `Android lenses: ${c2}`);
+      } finally {
+        await h2.close();
+      }
+    },
+  },
+  {
+    name: 'pinch zoom (D29): two fingers zoom within the camera range; the chip shows the level and goes back to 1×',
+    async fn() {
+      if (!chromium) return skip();
+      // The fake camera gets a zoom range 1..8 (as one Android rear camera with all the lenses).
+      const init = () => {
+        window.__zoom = [];
+        const P = MediaStreamTrack.prototype;
+        const caps = P.getCapabilities, sets = P.getSettings, apply = P.applyConstraints;
+        let z = 1;
+        P.getCapabilities = function () { return { ...(caps ? caps.call(this) : {}), zoom: { min: 1, max: 8, step: 0.1 } }; };
+        P.getSettings = function () { return { ...sets.call(this), zoom: z }; };
+        P.applyConstraints = function (c) {
+          const a = c && c.advanced && c.advanced[0];
+          if (a && a.zoom !== undefined) {
+            z = a.zoom;
+            window.__zoom.push(a.zoom);
+            return Promise.resolve();
+          }
+          return apply.call(this, c);
+        };
+      };
+      const h = await openApp('zoom', { init });
+      try {
+        const { page } = h;
+        await h.start();
+        assert(await page.$eval('#zoomChip', (e) => e.hidden), 'no chip at 1×');
+        // A pinch: two fingers 100 px apart, then 250 px apart: 2.5×.
+        const pinch = (from, to) => page.evaluate(([from, to]) => {
+          const f = document.getElementById('frame');
+          const r = f.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const ev = (type, id, x) => f.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: x, clientY: cy, bubbles: true, isPrimary: id === 1 }));
+          ev('pointerdown', 1, cx - from / 2);
+          ev('pointerdown', 2, cx + from / 2);
+          for (let k = 1; k <= 5; k++) ev('pointermove', 2, cx - from / 2 + from + ((to - from) * k) / 5);
+          ev('pointerup', 2, cx - from / 2 + to);
+          ev('pointerup', 1, cx - from / 2);
+        }, [from, to]);
+        await pinch(100, 250);
+        await page.waitForFunction(() => window.__zoom.length && Math.abs(window.__zoom[window.__zoom.length - 1] - 2.5) < 0.06);
+        assert(await page.$eval('#zoomChip', (e) => !e.hidden && e.textContent === '2.5×'), `the chip shows 2.5×: ${await page.$eval('#zoomChip', (e) => e.textContent)}`);
+        assert(await page.$eval('#focusBox', (b) => b.style.opacity !== '1'), 'a pinch is not a focus tap');
+        // One finger is still a focus tap.
+        await page.evaluate(() => {
+          const f = document.getElementById('frame');
+          const r = f.getBoundingClientRect();
+          const o = { pointerId: 7, clientX: r.left + 60, clientY: r.top + 60, bubbles: true, isPrimary: true };
+          f.dispatchEvent(new PointerEvent('pointerdown', o));
+          f.dispatchEvent(new PointerEvent('pointerup', o));
+        });
+        assert(await page.$eval('#focusBox', (b) => b.style.opacity === '1'), 'one finger: a focus tap');
+        // Far beyond the range: 8× at most.
+        await pinch(50, 400);
+        await page.waitForFunction(() => window.__zoom[window.__zoom.length - 1] === 8);
+        // Zoom works while recording, too.
+        await page.click('#shutter');
+        await h.waitState('recording');
+        await pinch(300, 100);
+        await page.waitForFunction(() => Math.abs(window.__zoom[window.__zoom.length - 1] - 2.7) < 0.06);
+        await page.click('#shutter');
+        await h.waitState('paused');
+        // The chip: back to 1×, and it hides.
+        await page.click('#zoomChip');
+        await page.waitForFunction(() => window.__zoom[window.__zoom.length - 1] === 1);
+        await page.waitForFunction(() => document.getElementById('zoomChip').hidden, null, { timeout: 3000 });
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
 ];
