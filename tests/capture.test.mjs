@@ -205,7 +205,8 @@ export const tests = [
             }
             assert(Math.abs(f.length + drops - sourceFrames) <= 1,
               `${sourceFrames} source frames, ${f.length} stored, ${drops} drops shown (largest gap ${maxGap.toFixed(1)} ms; ${info})`);
-            assert(maxGap < 40 || drops > 0, `a gap of ${maxGap.toFixed(1)} ms with no drop`);
+            // A long gap alone is not a lost frame: the camera can deliver a frame late (R-19). The
+            // count above (each source frame stored, or counted) is the check.
           }
         } finally {
           await h.close();
