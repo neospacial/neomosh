@@ -229,7 +229,10 @@ export const tests = [
         const core = () => page.$eval('#core', (c) => getComputedStyle(c).backgroundColor);
         await page.click('#gearBtn');
         assert(await page.$eval('html', (e) => e.dataset.theme) === 'default', 'the default theme');
-        assert(await accent() === 'rgb(153, 255, 0)' && await core() === 'rgb(153, 255, 0)', 'Default: #99ff00 accent and record colour');
+        assert(await accent() === 'rgb(153, 255, 0)', 'Default: #99ff00 accent');
+        // D27: Default: the red of the UI is #ff0080; the record button is the orb (the core is clear).
+        assert(await page.$eval('#recDot', (e) => getComputedStyle(e).backgroundColor) === 'rgb(255, 0, 128)', 'Default: #ff0080 recording dot');
+        assert(await core() === 'rgba(0, 0, 0, 0)' && await page.$eval('.orb', (e) => getComputedStyle(e).display === 'block' && getComputedStyle(e).opacity === '1'), 'Default: the orb when not recording');
         // The info section: closed, with the plain lines; the details only with #debug.
         assert(await page.$eval('#infoBox', (d) => !d.open), 'the info section is closed by default');
         assert(await page.$eval('#info', (e) => e.hidden), 'the details are hidden without #debug');
@@ -237,11 +240,31 @@ export const tests = [
         await page.click('#infoBox summary');
         const plain = await page.$eval('#infoBox', (d) => d.innerText);
         assert(/Dropped frames/.test(plain) && /Storage: \d+ MB used/.test(plain) && /(reads|scales|takes) the camera|reads the raw camera/.test(plain), `info: ${plain}`);
+        // Recording (Default): the orb goes, the core is the green square.
+        await page.click('#settingsSheet .done');
+        await page.click('#shutter');
+        await h.waitState('recording');
+        await page.waitForTimeout(400);
+        assert(await core() === 'rgb(153, 255, 0)' && await page.$eval('.orb', (e) => getComputedStyle(e).opacity === '0'), 'Default: the green square while recording');
+        await page.click('#shutter');
+        await h.waitState('paused');
+        await page.click('#gearBtn');
         const want = { os: ['rgb(255, 214, 10)', 'rgb(255, 59, 48)'], contrast: ['rgb(255, 255, 255)', 'rgb(255, 255, 255)'], night: ['rgb(232, 178, 125)', 'rgb(217, 120, 90)'] };
         for (const [t, [a, r]] of Object.entries(want)) {
           await page.click(`.seg[data-key="theme"] button[data-v="${t}"]`);
+          await page.waitForTimeout(300); // the record colour fades in (.18 s)
           assert(await accent() === a && await core() === r, `${t}: accent ${await accent()}, record ${await core()}`);
+          assert(await page.$eval('.orb', (e) => getComputedStyle(e).display === 'none'), `${t}: no orb`);
         }
+        await page.click('#settingsSheet .done');
+        // D27: reduced motion: no orb, the solid green button.
+        await page.click('#gearBtn');
+        await page.click(`.seg[data-key="theme"] button[data-v="default"]`);
+        await page.emulateMedia({ reducedMotion: 'reduce' });
+        await page.waitForTimeout(300);
+        assert(await page.$eval('.orb', (e) => getComputedStyle(e).display === 'none') && await core() === 'rgb(153, 255, 0)', 'reduced motion: the solid green button');
+        await page.emulateMedia({ reducedMotion: 'no-preference' });
+        await page.click(`.seg[data-key="theme"] button[data-v="night"]`);
         await page.click('#settingsSheet .done');
         // The theme stays after a reload.
         await page.reload();

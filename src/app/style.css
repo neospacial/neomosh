@@ -2,7 +2,8 @@
 :root{
   /* D26: the Default theme. Green #99ff00 for the accent and for the record colour. */
   --accent:#99ff00;
-  --rec:#99ff00;
+  --rec:#ff0080;   /* the red of the UI (recording dot, delete) */
+  --core:#99ff00;  /* the record button (the square while recording) */
   --warn:#ff9f0a;
   --on-accent:#000;
   --text:#fff;
@@ -15,10 +16,10 @@
   --row:#2c2c2e;
 }
 /* OS: the look of neocamera (iOS colours). */
-html[data-theme="os"]{--accent:#ffd60a;--rec:#ff3b30}
+html[data-theme="os"]{--accent:#ffd60a;--rec:#ff3b30;--core:var(--rec)}
 /* Contrast: white for the accent and the record colour, full white text, outlines on the controls. */
 html[data-theme="contrast"]{
-  --accent:#fff;--rec:#fff;--warn:#ffb340;--dim:#fff;--chip:#000;--line:rgba(255,255,255,.6);
+  --accent:#fff;--rec:#fff;--core:#fff;--warn:#ffb340;--dim:#fff;--chip:#000;--line:rgba(255,255,255,.6);
   --glass:rgba(0,0,0,.75);--sheet:#000;--row:#000;
 }
 html[data-theme="contrast"] .seg button,html[data-theme="contrast"] .ratio,html[data-theme="contrast"] #orientBtn,
@@ -30,7 +31,7 @@ html[data-theme="contrast"] .mode.active{text-decoration:underline;text-underlin
 html[data-theme="contrast"] .actions button.danger,html[data-theme="contrast"] #confirm button.danger{text-decoration:underline}
 /* Night: soft, warm accents and warm text. */
 html[data-theme="night"]{
-  --accent:#e8b27d;--rec:#d9785a;--warn:#d9a05b;--text:#f2e6d8;--dim:#a8998a;
+  --accent:#e8b27d;--rec:#d9785a;--core:#d9785a;--warn:#d9a05b;--text:#f2e6d8;--dim:#a8998a;
   --chip:rgba(255,226,196,.10);--line:rgba(255,226,196,.08);--glass:rgba(255,226,196,.14);--sheet:#1c1814;--row:#2a241f;
 }
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -186,8 +187,57 @@ body[data-lock="1"] #lockBadge{display:block}
 }
 #shutter:active{transform:scale(.94)}
 #shutter[disabled]{opacity:.4}
-#core{width:60px;height:60px;border-radius:50%;background:var(--rec);transition:width .18s ease,height .18s ease,border-radius .18s ease}
+#shutter{position:relative;isolation:isolate}
+#core{position:relative;z-index:1;width:60px;height:60px;border-radius:50%;background:var(--core);transition:width .18s ease,height .18s ease,border-radius .18s ease,background-color .18s ease}
 body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;height:30px;border-radius:8px}
+
+/* D27: the orb record button (neoascii v1.0.13, orb-button v1.1.0), Default theme only. It shows when
+   not recording; on record it fades out while the core grows into the solid square. Its animation
+   stops while it is hidden, so it takes no time from the encoder. */
+.orb{display:none}
+html[data-theme="default"] .orb{
+  --o1:#ccf000; --o2:#9eb8ff; --o3:#3c5dff80; --o4:#6943bc80; --o5:#ff00ff40;
+  --oT:2s; --oTurn:calc(var(--oT) * 4);
+  display:block;position:absolute;left:50%;top:50%;
+  width:100px;height:100px;margin:-50px 0 0 -50px;
+  border-radius:50%;pointer-events:none;
+  transform:scale(.6);opacity:1;
+  box-shadow:0 0 25px 0 var(--o3), 0 20px 50px 0 var(--o4);
+  animation:orbColour calc(var(--oT) * 6) ease-in-out infinite;
+  transition:opacity .18s ease,transform .18s ease;
+}
+html[data-theme="default"] .orb::before{
+  content:"";position:absolute;inset:0;border-radius:50%;
+  border-top:solid 1px var(--o1);border-bottom:solid 1px var(--o2);
+  background:linear-gradient(180deg, var(--o5), var(--o4));
+  box-shadow:inset 0 10px 10px 0 var(--o3), inset 0 -10px 10px 0 var(--o4);
+}
+.orb svg{position:absolute;left:0;top:0;display:block}
+.orb .s1{stop-color:var(--o1)}
+.orb .s2{stop-color:var(--o2)}
+.orbTri polygon:nth-child(1){transform-origin:50% 50%;animation:orbTurn var(--oTurn) linear infinite reverse}
+.orbTri polygon:nth-child(2){transform-origin:50% 60%;animation:orbTurn var(--oTurn) linear infinite;animation-delay:calc(var(--oTurn) / -3)}
+.orbTri polygon:nth-child(3){transform-origin:40% 40%;animation:orbTurn var(--oTurn) linear infinite reverse}
+.orbTri polygon:nth-child(4){transform-origin:40% 40%;animation:orbTurn var(--oTurn) linear infinite reverse;animation-delay:calc(var(--oTurn) / -2)}
+.orbTri polygon:nth-child(5){transform-origin:60% 40%;animation:orbTurn var(--oTurn) linear infinite}
+.orbTri polygon:nth-child(6){transform-origin:60% 40%;animation:orbTurn var(--oTurn) linear infinite;animation-delay:calc(var(--oTurn) / -1.5)}
+@keyframes orbTurn{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+@keyframes orbColour{
+  0%{filter:hue-rotate(0deg)}20%{filter:hue-rotate(-30deg)}40%{filter:hue-rotate(-60deg)}
+  60%{filter:hue-rotate(-90deg)}80%{filter:hue-rotate(-45deg)}100%{filter:hue-rotate(0deg)}
+}
+/* Not recording: the orb in the place of the solid circle. */
+html[data-theme="default"] #core{background:transparent}
+/* Recording: the orb goes, the green square comes. */
+html[data-theme="default"] body[data-state="recording"] #core,html[data-theme="default"] body[data-state="pausing"] #core{background:var(--core)}
+html[data-theme="default"] body[data-state="recording"] .orb,html[data-theme="default"] body[data-state="pausing"] .orb{opacity:0;transform:scale(.3)}
+html[data-theme="default"] body[data-state="recording"] .orb,html[data-theme="default"] body[data-state="recording"] .orbTri polygon,
+html[data-theme="default"] body[data-state="pausing"] .orb,html[data-theme="default"] body[data-state="pausing"] .orbTri polygon{animation-play-state:paused}
+/* Reduced motion: no orb; the solid green button, as in the other themes. */
+@media (prefers-reduced-motion:reduce){
+  html[data-theme="default"] .orb{display:none}
+  html[data-theme="default"] #core{background:var(--core)}
+}
 
 #flip{width:50.6px;height:50.6px;border-radius:50%;justify-self:end;background:var(--glass);display:grid;place-items:center}
 #flip svg{width:26.4px;height:26.4px;fill:var(--text)}
