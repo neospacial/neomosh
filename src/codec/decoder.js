@@ -9,7 +9,8 @@ import { readResidualBlock } from './cavlc.js';
 import { makeRef, allocRef, buildRef, predLuma, predChroma } from './inter.js';
 import { yuv420ToRgba } from './color.js';
 import { Kernels } from './wasm.js';
-import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM } from './mvpred.js';
+import { makeMbInfo, allocMbInfo, mvPred16x16, mvSkip, lumaNC, chromaNC, MB_SKIP, MB_INTER, MB_PCM, MB_INTRA } from './mvpred.js';
+import { predIntra16, predIntraChroma, reconIntra16, IntraResidual } from './intra.js';
 import { MbResidual, reconInterMB } from './transform.js';
 import { align16, parseNal } from './headers.js';
 
@@ -83,7 +84,8 @@ export class Decoder {
   decodeSliceData(br, intra, sliceQp) {
     if (!intra && !this.hasRef) throw new Error('P picture without a reference picture');
     const nBytes = (br.len + 7) >> 3;
-    if (this.k && nBytes <= this.bitCap) {
+    // D33: an I slice (Intra 16x16) is decoded in JavaScript; a P slice in the kernels.
+    if (this.k && nBytes <= this.bitCap && !intra) {
       // The whole slice in the kernels (kernels.c decode_slice, the same steps as below).
       this.bitBuf.set(br.buf.subarray(0, nBytes));
       const err = this.k.x.decode_slice(this.bitBuf.byteOffset, br.pos, br.len, br.alignBase, intra ? 1 : 0, sliceQp,
@@ -106,6 +108,7 @@ export class Decoder {
       }
       const mbType = br.ue();
       if (intra ? mbType === 25 : mbType === 30) this.decodePcm(br, addr);
+      else if (intra && mbType >= 1 && mbType <= 24) qp = this.decodeIntra16(br, addr, qp, mbType);
       else if (!intra && mbType === 0) qp = this.decodeInter(br, addr, qp);
       else throw new Error(`Macroblock type ${mbType} is not supported`);
       addr++;
@@ -161,6 +164,78 @@ export class Decoder {
     info.nzLuma.fill(16, addr * 16, addr * 16 + 16);
     info.nzCb.fill(16, addr * 4, addr * 4 + 4);
     info.nzCr.fill(16, addr * 4, addr * 4 + 4);
+  }
+
+  // Intra 16x16 (D33, 7.3.5): the luma mode and the coded block patterns are in mb_type.
+  decodeIntra16(br, addr, qp, mbType) {
+    const mbx = addr % this.mbW, mby = (addr / this.mbW) | 0;
+    const mode = (mbType - 1) % 4, cbpC = ((mbType - 1) / 4 | 0) % 3, cbpL = mbType >= 13 ? 15 : 0;
+    const cmode = br.ue();
+    if (cmode > 3) throw new Error('intra_chroma_pred_mode out of range');
+    const dqp = br.se();
+    if (dqp < -26 || dqp > 25) throw new Error('mb_qp_delta out of range');
+    qp = (qp + dqp + 52) % 52;
+    const info = this.info, coef = this.coef;
+    if (!this.ires) {
+      this.ires = new IntraResidual();
+      this.ipY = new Uint8Array(256);
+      this.ipU = new Uint8Array(64);
+      this.ipV = new Uint8Array(64);
+    }
+    const res = this.ires;
+    res.dc.fill(0);
+    res.ac.fill(0);
+    res.cb.fill(0);
+    res.cr.fill(0);
+    res.cbDC.fill(0);
+    res.crDC.fill(0);
+    res.cbpL = cbpL;
+    res.cbpC = cbpC;
+    info.type[addr] = MB_INTRA;
+    info.mvx[addr] = 0;
+    info.mvy[addr] = 0;
+    info.nzLuma.fill(0, addr * 16, addr * 16 + 16);
+    info.nzCb.fill(0, addr * 4, addr * 4 + 4);
+    info.nzCr.fill(0, addr * 4, addr * 4 + 4);
+    coef.fill(0);
+    readResidualBlock(br, coef, 16, lumaNC(info, addr, mbx, mby, this.mbW, 0, 0));
+    for (let i = 0; i < 16; i++) res.dc[ZIGZAG4x4[i]] = coef[i];
+    if (cbpL) {
+      for (let b8 = 0; b8 < 4; b8++) {
+        for (let b4 = 0; b4 < 4; b4++) {
+          const bx = (b8 & 1) * 2 + (b4 & 1), by = (b8 >> 1) * 2 + (b4 >> 1), b = by * 4 + bx;
+          coef.fill(0);
+          const n = readResidualBlock(br, coef, 15, lumaNC(info, addr, mbx, mby, this.mbW, bx, by));
+          info.nzLuma[addr * 16 + b] = n;
+          for (let i = 0; i < 15; i++) res.ac[b * 16 + ZIGZAG4x4[i + 1]] = coef[i];
+        }
+      }
+    }
+    if (cbpC) {
+      for (let comp = 0; comp < 2; comp++) {
+        coef.fill(0);
+        readResidualBlock(br, coef, 4, -1);
+        (comp ? res.crDC : res.cbDC).set(coef.subarray(0, 4));
+      }
+    }
+    if (cbpC === 2) {
+      for (let comp = 0; comp < 2; comp++) {
+        const nz = comp ? info.nzCr : info.nzCb, ac = comp ? res.cr : res.cb;
+        for (let b = 0; b < 4; b++) {
+          coef.fill(0);
+          const n = readResidualBlock(br, coef, 15, chromaNC(nz, addr, mbx, mby, this.mbW, b & 1, b >> 1));
+          nz[addr * 4 + b] = n;
+          for (let i = 0; i < 15; i++) ac[b * 16 + ZIGZAG4x4[i + 1]] = coef[i];
+        }
+      }
+    }
+    const W = this.codedW, cW = W >> 1;
+    if (!predIntra16(this.Y, W, mbx, mby, mode, this.ipY)) throw new Error('Intra 16x16 mode without its neighbours');
+    if (!predIntraChroma(this.U, cW, mbx, mby, cmode, this.ipU) || !predIntraChroma(this.V, cW, mbx, mby, cmode, this.ipV)) {
+      throw new Error('Intra chroma mode without its neighbours');
+    }
+    reconIntra16(res, qp, this.ipY, this.ipU, this.ipV, this.Y, mby * 16 * W + mbx * 16, W, this.U, this.V, mby * 8 * cW + mbx * 8, cW);
+    return qp;
   }
 
   decodeInter(br, addr, qp) {

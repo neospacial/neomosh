@@ -104,7 +104,7 @@ The tests encode synthetic video, write an Annex B `.264` file and an `.mp4` fil
 - The export has only one sync frame (frame 0), unless a cut is set to Clean. Players seek slowly in long files. Playback is normal.
 - At a Mosh cut, the hidden I-frame and its time slot are not in the file: each Mosh cut makes the video one frame shorter, and there is no hold of the last picture before the cut.
 - The live view can skip pictures when the decoder is late. This is by design: the recording has priority, and the file keeps all frames. The info section shows the count ("view skipped").
-- I-frames use I_PCM (no compression). Their bitrate can be above the level limit. The level is selected only from the frame size and the macroblock rate.
+- I-frames (the first frame, and the hidden I-frame at each cut) use Intra 16×16 prediction (about 10 to 100 times smaller than uncompressed frames). Heal blocks in P-frames are uncompressed (I_PCM). The level is selected from the frame size and the macroblock rate; bitrate limits are not checked.
 - A slow device drops frames. Touch the amber badge: it shows the cause. "Encoder busy": use a smaller size, a lower frame rate, or a smaller search range. "Page late": the page did not get all camera frames; close other apps. In Chrome, the camera frames go to a capture worker, so the page is not in the frame path. In other browsers, and for a file source, the page captures the frames.
 - No audio. The browser has no AAC encoder on all platforms, and audio made the frame drops worse (plan D20).
 - When the storage is full, the recording pauses and the last clip is not kept. Export the video, or free some space.

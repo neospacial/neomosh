@@ -67,6 +67,7 @@ Main flow:
 | D30 | **One WebAssembly compile.** The page has the module bytes (base64) once and compiles them at load with `WebAssembly.compile` (it does not block the page). Each app worker gets the compiled module as its first message (`kernels`) and keeps its other messages until then; the worker code has no bytes. Before, each worker decoded and compiled the bytes itself (about 11 ms each here). Measured: the first recording starts in about 130 ms, was 140–240 ms. The benchmark page keeps its own bytes. |
 | D31 | **Live view by the GPU.** While recording (and blooming), the decoder worker sends the preview picture as an I420 `VideoFrame` made from its planes (BT.709 limited), and the page draws it: the GPU converts the colour. No YUV to RGBA in the kernels and no `putImageData` for the live view. When the browser cannot make or send a VideoFrame, the bitmap way. The paused overlay, the thumbnails, the history player, and the Upscale export keep the exact bitmap way (the player is compared with the export). Measured at 1080p: decoder worker 21.9 → 7.4 ms per frame (median), view skips 14 → 3 in 3 s. |
 | D32 | **Export memory.** The Original and Upscale exports pack the sample data into Blobs of 32 MB as it comes (`DataPacker`), and the muxer writes these Blobs after the `mdat` header; the samples keep only their sizes, times, and flags. The browser can keep a Blob out of the JavaScript memory (on disk when it is large), so a long export does not hold the whole video in RAM (before: about 730 MB for 5 minutes at 1080p, plus the copy into the file). The file is the same, byte for byte (test). |
+| D33 | **Coded I-frames.** I pictures use Intra 16×16 macroblocks, not I_PCM: the luma mode (vertical, horizontal, DC, plane) and the chroma mode (DC, horizontal, vertical, plane) with the smallest SAD, the 4×4 transform with the luma DC Hadamard (8.5.10), intra rounding (f = 2^qbits / 3), CAVLC as in P pictures, the session QP. `src/codec/intra.js` has the prediction and the reconstruction for the encoder and the decoder; `kernels.c encode_i_frame` is the same encoder in the kernels (bit for bit the same, test). The decoder reads I slices in JavaScript (Intra 16×16 and I_PCM). Measured, smooth content with noise: 720×1280 1357 KB → 14 KB, 1080×1920 3076 KB → 33 KB; encode 12 ms (720p) and 28 ms (1080p) in the kernels. Heal blocks in P pictures stay I_PCM. The FFmpeg checks (identical pictures) and the Chromium decoder checks pass. |
 
 Change from the planning chat (needs Ryan's approval only if he disagrees): Ryan expected that settings can change only before a video starts. Analysis shows that **only the size, the aspect ratio, the orientation, and the frame rate** must be locked for the session. All other encoder settings are stored for each frame. Thus they can change **while paused** (each clip can have different settings). They cannot change while recording. See §7.
 
@@ -252,12 +253,13 @@ NAL types: frame 0 → type 5 (IDR). Others → type 1. A hidden I-frame that th
 
 | Picture | mb_type value | Meaning |
 |---|---|---|
-| I | 25 | I_PCM |
+| I | 1–24 | Intra 16×16 (D33): 1 + pred mode + 4 × cbp chroma + 12 × (cbp luma = 15) |
+| I | 25 | I_PCM (old sessions, tests) |
 | P | (skip run) | P_Skip, coded by `mb_skip_run` |
 | P | 0 | P_L0_16x16 |
 | P | 30 | I_PCM (intra in P; only with Heal On) |
 
-Version 1 uses only 16×16 partitions. I-pictures use only I_PCM. I_PCM is lossless, so the hidden I-frame reconstruction equals the source frame exactly.
+Version 1 uses only 16×16 partitions. I-pictures use Intra 16×16 (D33; before D33, only I_PCM). The encoder reconstruction is the decoder output (the same functions), so the encoder reference after a hidden I-frame is the Clean picture.
 
 I_PCM syntax: `pcm_alignment_zero_bit` to the byte boundary, then 256 luma bytes, 64 Cb bytes, 64 Cr bytes. Clamp PCM samples to 1–255 (older decoders reject 0).
 
@@ -399,7 +401,7 @@ PAUSED ──► REVIEW (player, history) ──► PAUSED
 ### 8.5 Resume
 
 1. Hide the overlay.
-2. Tell the encoder: "new clip". The next frame is a **hidden I-frame** (all I_PCM). The encoder uses it as its reference. The packet is stored with type `hiddenI`.
+2. Tell the encoder: "new clip". The next frame is a **hidden I-frame** (Intra 16×16, D33). The encoder uses it as its reference. The packet is stored with type `hiddenI`.
 3. All next frames are P-frames.
 4. The decoder ignores the hidden frame. Its reference stays the moshed picture.
 
@@ -710,7 +712,7 @@ Done when: all §13.1 and §13.2 tests pass, and Ryan has run the benchmark on h
 - ~~**Bloom**~~: done in v0.1.0 (D24).
 - Smaller partitions (16×8, 8×16, 8×8) for finer smears.
 - Deblocking filter as a setting (softer look; the decoder needs the 8.7 filter).
-- Intra 16×16 prediction instead of I_PCM (smaller files).
+- ~~Intra 16×16 prediction instead of I_PCM~~: done in v0.1.0 (D33).
 - ~~File no-drop mode~~: done in v0.1.0 (D25), with a decoder instead of slower playback.
 - Export and import of a session file.
 
@@ -726,7 +728,7 @@ Done when: all §13.1 and §13.2 tests pass, and Ryan has run the benchmark on h
 | iOS storage limits or eviction | Lost session | Warnings, frequent writes (no `storage.persist()`, D18) |
 | No AAC encoder | No audio | Badge, video-only export |
 | One sync frame | Slow seeking in long files | README note; Clean cuts add sync frames |
-| Large I_PCM frames above level bitrate | A strict decoder could complain | Tested in §13.4; v2 can use Intra 16×16 |
+| Large I_PCM frames above level bitrate | A strict decoder could complain | Solved by D33 (Intra 16×16 I-frames); Heal blocks are still I_PCM |
 
 ---
 
