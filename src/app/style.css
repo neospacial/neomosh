@@ -139,6 +139,14 @@ body[data-state="paused"] #overlay{display:block;will-change:opacity;transform:t
 }
 body[data-lock="1"] #lockBadge{display:block}
 
+/* D28: the rear cameras (lenses), over the bottom of the view, when there is more than one. */
+#lensBar{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);z-index:4;display:flex;gap:8px;
+  padding:4px;border-radius:22px;background:rgba(0,0,0,.35)}
+#lensBar[hidden]{display:none}
+#lensBar button{min-width:34px;height:34px;padding:0 8px;border-radius:17px;background:var(--glass);
+  font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
+#lensBar button.active{color:var(--accent);background:rgba(0,0,0,.55);transform:scale(1.1)}
+html[data-theme="contrast"] #lensBar button{box-shadow:inset 0 0 0 1.5px #fff}
 #toast{
   position:absolute;left:50%;bottom:18px;transform:translate(-50%,8px);
   background:rgba(0,0,0,.62);border-radius:16px;padding:7px 14px;

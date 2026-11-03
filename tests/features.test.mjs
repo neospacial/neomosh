@@ -116,4 +116,72 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'rear cameras (D28): lens chips, the selected lens opens, locked while recording; Android labels are numbers',
+    async fn() {
+      if (!chromium) return skip();
+      // Three rear cameras (iPhone labels) and a front camera. Each opens the fake camera, and its
+      // track reports the deviceId that was asked for.
+      const init = () => {
+        const labels = window.__labels || ['Back Camera', 'Back Ultra Wide Camera', 'Back Telephoto Camera', 'Back Dual Wide Camera', 'Front Camera'];
+        const md = navigator.mediaDevices;
+        const gum = md.getUserMedia.bind(md);
+        window.__asked = [];
+        md.enumerateDevices = async () => labels.map((label, i) => ({ kind: 'videoinput', deviceId: `cam${i}`, groupId: 'g', label }));
+        md.getUserMedia = async (c) => {
+          const v = c.video || {};
+          const id = v.deviceId && v.deviceId.exact ? v.deviceId.exact : 'cam0';
+          window.__asked.push(id);
+          const s = await gum({ video: { width: v.width, height: v.height }, audio: false });
+          const t = s.getVideoTracks()[0];
+          const gs = t.getSettings.bind(t);
+          t.getSettings = () => ({ ...gs(), deviceId: id });
+          return s;
+        };
+      };
+      const h = await openApp('lenses', { init });
+      try {
+        const { page } = h;
+        await h.start();
+        await page.waitForSelector('#lensBar:not([hidden])');
+        const chips = () => page.$$eval('#lensBar button', (b) => b.map((x) => x.textContent + (x.classList.contains('active') ? '*' : '')).join(' '));
+        assert(await chips() === '0.5× 1×* Tele', `iPhone lenses: ${await chips()}`);
+        await page.click('#lensBar button:nth-child(3)');
+        await page.waitForFunction(() => document.querySelector('#lensBar button.active') && document.querySelector('#lensBar button.active').textContent === 'Tele');
+        assert((await page.evaluate(() => window.__asked)).slice(-1)[0] === 'cam2', 'the telephoto camera was asked for');
+        const ready = () => page.waitForFunction(() => {
+          const v = document.getElementById('preview');
+          return v.readyState >= 2 && v.videoWidth > 0 && !document.getElementById('shutter').disabled;
+        });
+        await ready();
+        await page.click('#shutter');
+        await h.waitState('recording');
+        assert(await page.$eval('#lensBar', (e) => e.hidden), 'no lens change while recording');
+        await page.waitForTimeout(800);
+        await page.click('#shutter');
+        await h.waitState('paused');
+        assert(!(await page.$eval('#lensBar', (e) => e.hidden)), 'the lenses show again while paused');
+        await page.click('#lensBar button:nth-child(1)');
+        await page.waitForFunction(() => document.querySelector('#lensBar button.active').textContent === '0.5×');
+        await ready();
+        await h.clip(800);
+        const db = await h.db();
+        assert(db.frames.length > 20 && db.points.length === 3, 'two clips with two lenses');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+      // Android labels: numbers, in the order of the list.
+      const android = `window.__labels = ['camera2 0, facing back', 'camera2 1, facing front', 'camera2 2, facing back', 'camera2 3, facing back'];(${init.toString()})();`;
+      const h2 = await openApp('lenses2', { init: android });
+      try {
+        await h2.start();
+        await h2.page.waitForSelector('#lensBar:not([hidden])');
+        const c2 = await h2.page.$$eval('#lensBar button', (b) => b.map((x) => x.textContent + (x.classList.contains('active') ? '*' : '')).join(' '));
+        assert(c2 === '1* 2 3', `Android lenses: ${c2}`);
+      } finally {
+        await h2.close();
+      }
+    },
+  },
 ];

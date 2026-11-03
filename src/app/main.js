@@ -20,6 +20,7 @@ const el = {
   thumbBtn: $('thumbBtn'), thumbImg: $('thumbImg'), slider: $('opacity'), pct: $('pct'),
   orientBtn: $('orientBtn'), ratios: [...document.querySelectorAll('.ratio')],
   focusBox: $('focusBox'), expoSun: $('expoSun'),
+  lensBar: $('lensBar'),
   gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'),
   gate: $('gate'), gateTitle: $('gateTitle'), gateText: $('gateText'), gateBtn: $('gateBtn'), gateNew: $('gateNew'),
   player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
@@ -45,6 +46,8 @@ const S = {
   fileUrl: '',
   file: null, // the File of the file source (D25)
   facing: 'environment',
+  lenses: [], // D28: the rear cameras: [{ id, name }]
+  lensId: null, // the rear camera in use (null: the one that facingMode gives)
   aspect: '4:3',
   orient: 'auto', // auto, v, or h
   size: 480,
@@ -205,8 +208,10 @@ function relayout() {
 
 /* ---------------- camera ---------------- */
 
-function videoWanted(facing) {
-  return { facingMode: { ideal: facing }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+// lensId (D28): a rear camera by its deviceId, else the camera that facingMode gives.
+function videoWanted(facing, lensId = null) {
+  const size = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+  return lensId && facing === 'environment' ? { deviceId: { exact: lensId }, ...size } : { facingMode: { ideal: facing }, ...size };
 }
 
 function stopStream() {
@@ -222,7 +227,14 @@ async function startStream(facing) {
   }
   stopStream();
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: false });
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing, S.lensId), audio: false });
+    } catch (e) {
+      if (!S.lensId || facing !== 'environment') throw e;
+      S.lensId = null; // that lens did not open: the default rear camera
+      stream = await navigator.mediaDevices.getUserMedia({ video: videoWanted(facing), audio: false });
+    }
     applyStream(stream, facing);
     return true;
   } catch (err) {
@@ -238,6 +250,8 @@ function applyStream(stream, facing) {
   S.stream = stream;
   S.facing = facing;
   S.hasVideo = stream.getVideoTracks().length > 0;
+  const tr = stream.getVideoTracks()[0];
+  if (facing === 'environment' && tr && tr.getSettings) S.lensId = tr.getSettings().deviceId || S.lensId;
   clearFocus();
   el.preview.srcObject = stream;
   el.preview.classList.toggle('mirror', mirrored());
@@ -271,9 +285,53 @@ function readCapabilities() {
 function countCameras() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
   navigator.mediaDevices.enumerateDevices().then((list) => {
-    S.multiCam = list.filter((d) => d.kind === 'videoinput').length > 1;
+    const cams = list.filter((d) => d.kind === 'videoinput');
+    S.multiCam = cams.length > 1;
+    S.lenses = rearLenses(cams);
     refreshUI();
   }).catch(() => {});
+}
+
+/* D28: the rear cameras. The labels come after the camera permission. iPhone labels name the lens
+   ("Back Ultra Wide Camera", "Back Camera", "Back Telephoto Camera"); its virtual "Dual" and "Triple"
+   cameras are left out. Android labels ("camera2 2, facing back") do not name the lens: numbers. */
+function rearLenses(cams) {
+  const back = cams.filter((d) => /back|rear|environment/i.test(d.label) && !/dual|triple/i.test(d.label));
+  if (back.length < 2) return [];
+  const kind = (l) => (/ultra ?wide/i.test(l) ? 0 : /tele/i.test(l) ? 2 : /wide|back camera$/i.test(l) ? 1 : -1);
+  if (back.every((d) => kind(d.label) >= 0)) {
+    return back.map((d) => ({ id: d.deviceId, k: kind(d.label) })).sort((a, b) => a.k - b.k)
+      .map((d) => ({ id: d.id, name: ['0.5×', '1×', 'Tele'][d.k] }));
+  }
+  return back.map((d, i) => ({ id: d.deviceId, name: String(i + 1) }));
+}
+
+function renderLenses() {
+  const st = state();
+  const show = S.source === 'camera' && S.facing === 'environment' && S.lenses.length > 1 && (st === ST.IDLE || st === ST.PAUSED);
+  el.lensBar.hidden = !show;
+  if (!show) return;
+  const key = S.lenses.map((l) => l.id + l.name).join() + '|' + S.lensId;
+  if (el.lensBar.dataset.key === key) return;
+  el.lensBar.dataset.key = key;
+  el.lensBar.textContent = '';
+  for (const l of S.lenses) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = l.name;
+    b.setAttribute('aria-label', `Rear camera ${l.name}`);
+    b.classList.toggle('active', l.id === S.lensId);
+    b.addEventListener('click', () => selectLens(l.id));
+    el.lensBar.appendChild(b);
+  }
+}
+
+// A lens change is a camera change: only while IDLE or PAUSED (as the camera switch).
+function selectLens(id) {
+  const st = state();
+  if (!S.hasVideo || id === S.lensId || (st !== ST.IDLE && st !== ST.PAUSED)) return;
+  S.lensId = id;
+  startStream('environment').then(refreshUI);
 }
 
 function flipCamera() {
@@ -702,6 +760,7 @@ function scheduleProbe() {
 
 function refreshUI() {
   scheduleProbe();
+  renderLenses();
   const st = state();
   const idleOrPaused = st === ST.IDLE || st === ST.PAUSED;
   el.shutter.disabled = !(S.source === 'file' ? !!S.fileUrl : S.hasVideo) || !(idleOrPaused || st === ST.RECORDING);

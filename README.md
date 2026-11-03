@@ -9,7 +9,7 @@ The exported file is a valid H.264 (Constrained Baseline) stream. Each conformin
 ## How to use
 
 1. Put `dist/neomosh-v0.1.0.html` on a web server with HTTPS (for example GitHub Pages), or open it on `localhost`. Browsers refuse camera access on plain HTTP. Safari also refuses it on a local `file://` page.
-2. Touch **Start** and give permission to the camera.
+2. Touch **Start** and give permission to the camera. When the phone has more than one rear camera, chips at the bottom of the view (for example **0.5×**, **1×**, **Tele**, or **1**, **2**, **3**) select one, before a clip or while paused.
 3. Touch the red button to record. The view shows the decoded output of the encoder.
 4. Touch the button again to pause. The last picture shows above the live camera. Move the **Guide** slider to change its opacity, and align the next shot.
 5. Touch the red button to resume. The new clip has no keyframe, so its motion moves the old picture. This is the datamosh. The mosh needs movement: if nothing moves, the old picture stays frozen.
