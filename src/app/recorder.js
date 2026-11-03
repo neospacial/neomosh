@@ -95,7 +95,10 @@ export class Recorder {
       const prev = wk.onmessage;
       wk.onmessage = (e) => {
         if (e.data.cmd === 'ready') {
-          if (wk === this.cap) this.capMstp = e.data.mstp;
+          if (wk === this.cap) {
+            this.capMstp = e.data.mstp;
+            this.capVd = e.data.vd;
+          }
           else this.wasm = e.data.wasm;
           wk.onmessage = prev;
           resolve();
@@ -125,6 +128,20 @@ export class Recorder {
   // R-14: the camera frames go to the capture worker (MediaStreamTrackProcessor), not through the
   // main thread. Returns false when this is not possible: then the page path (rVFC) is used.
   startCapture() {
+    // D25: a file goes to the capture worker, which decodes each frame (no real time, no drops).
+    if (this.source === 'file') {
+      if (!this.file || !this.cap || !this.capVd || this.fileSlow === this.file) {
+        this.capReason = this.fileSlow === this.file ? 'file: not an MP4/MOV file that this browser decodes' : 'file: no VideoDecoder';
+        return false;
+      }
+      this.cap.postMessage({
+        cmd: 'capFileStart', file: this.file, startUs: Math.round(this.video.currentTime * 1e6), fps: this.params.fps,
+        sessionEndUs: this.sessionEndUs, seq: this.seq,
+      });
+      this.capActive = true;
+      this.captureMode = 'file';
+      return true;
+    }
     const stream = this.video.srcObject;
     const track = this.source === 'camera' && !this.noCapWorker && this.cap && stream && stream.getVideoTracks ? stream.getVideoTracks()[0] : null;
     // The reason for the page path, for the info section.
@@ -310,6 +327,23 @@ export class Recorder {
       this.noCapWorker = true;
       this.captureMode = 'page';
       this.capReason = `frames ${m.fw}×${m.fh} (coded ${m.cw}×${m.ch}, rotation ${m.rotation}), view ${this.video.videoWidth}×${this.video.videoHeight}`;
+    } else if (m.cmd === 'capFileFail') {
+      // The file is not one that the worker reads: play it in real time (the page path).
+      this.capActive = false;
+      this.fileSlow = this.file;
+      this.captureMode = 'page';
+      this.capReason = 'file: not an MP4/MOV file that this browser decodes';
+      if (this.state === ST.RECORDING) {
+        this.loop();
+        if (this.on.filePlay) this.on.filePlay();
+      }
+      if (this.capWaiter) {
+        const w = this.capWaiter;
+        this.capWaiter = null;
+        w();
+      }
+    } else if (m.cmd === 'fileTime') {
+      if (this.on.fileTime) this.on.fileTime(m.us, m.durationUs);
     } else if (m.cmd === 'capStopped') {
       // The packets of these frames decrement encInFlight (it can be below 0 until now).
       this.encInFlight += m.sent;
@@ -317,11 +351,16 @@ export class Recorder {
       this.capActive = false;
       if (this.capTrack) this.capTrack.stop();
       this.capTrack = null;
+      // A file clip: the next clip starts after its last frame. At the end of the file: pause.
+      if (m.file) {
+        if (this.on.fileStopped) this.on.fileStopped(m.lastUs + 1e6 / this.params.fps, m.ended);
+        if (m.ended && this.state === ST.RECORDING) this.pause('The file ended.');
+      }
       if (this.capWaiter) {
         const w = this.capWaiter;
         this.capWaiter = null;
         w();
-      } else if (this.state === ST.RECORDING) {
+      } else if (this.state === ST.RECORDING && !m.file) {
         this.loop(); // after a mismatch: continue with the page path
       }
       this.checkIdle();
@@ -364,10 +403,12 @@ export class Recorder {
   }
 
   // The source <video> for the next clip (IDLE or PAUSED only).
-  setSource(video, kind) {
+  // file: the File of a file source (D25: the capture worker reads it without real time).
+  setSource(video, kind, file = null) {
     if (this.state === ST.RECORDING || this.state === ST.PAUSING) return;
     this.video = video;
     this.source = kind;
+    this.file = kind === 'file' ? file : null;
   }
 
   // Record (from IDLE with a new session) or resume (from PAUSED).
