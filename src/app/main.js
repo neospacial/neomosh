@@ -1270,6 +1270,7 @@ async function runExport() {
   try {
     await rec.store.flush();
     const opts = {
+      blobChunk: 32 * 1048576, // D32: the data in Blobs of 32 MB, not all in RAM
       cuts: cutModes.slice(),
       smooth: expSmooth,
       signal: exportCtl.signal,

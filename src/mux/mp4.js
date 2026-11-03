@@ -152,11 +152,47 @@ function chunkOffsets(offsets, use64) {
   return fullBox(use64 ? 'co64' : 'stco', 0, 0, b);
 }
 
+// R-27, D32: the sample data of an export, packed into Blobs of about chunkBytes as it comes. A Blob
+// can be kept by the browser out of the JavaScript memory (on disk when it is large), so a long export
+// does not hold all its data in RAM. chunkBytes 0: no packing (the arrays, for tests).
+export class DataPacker {
+  constructor(chunkBytes = 0) {
+    this.chunk = chunkBytes;
+    this.parts = [];
+    this.pending = [];
+    this.pendingBytes = 0;
+  }
+
+  add(data) {
+    if (!this.chunk) {
+      this.parts.push(data);
+      return;
+    }
+    this.pending.push(data);
+    this.pendingBytes += data.length;
+    if (this.pendingBytes >= this.chunk) this.flush();
+  }
+
+  flush() {
+    if (!this.pending.length) return;
+    this.parts.push(new Blob(this.pending));
+    this.pending = [];
+    this.pendingBytes = 0;
+  }
+
+  // The parts in file order (Blobs and arrays).
+  done() {
+    this.flush();
+    return this.parts;
+  }
+}
+
 // Make the MP4 file.
 // video = { width, height, timescale, sps, pps, samples: [{ data: Uint8Array | Blob, size, duration, key, cto }] }
 // The samples are in decode order. duration: the decode time to the next sample. cto (optional): the
 // composition offset (display time - decode time, >= 0). video.mediaTime: the edit list start (the
-// largest delay), when the samples have composition offsets.
+// largest delay), when the samples have composition offsets. video.dataParts (optional): the sample
+// data in file order (from a DataPacker); then the samples need only their sizes.
 // opts.chunkDuration: chunk length in timescale units (default 1 s).
 // opts.forceCo64, opts.forceLargeMdat: for tests only.
 // Returns { parts, size }. parts: Uint8Array headers and the sample data, in file order.
@@ -228,6 +264,7 @@ export function muxMp4(video, opts = {}) {
   if (!opts.forceCo64 && r.lastOffset > 0xffffffff) r = build(true);
 
   const parts = [head, r.moov, mdatHeader];
-  for (const s of samples) parts.push(s.data);
+  if (video.dataParts) parts.push(...video.dataParts);
+  else for (const s of samples) parts.push(s.data);
   return { parts, size: head.length + r.moov.length + mdatHeader.length + mdatPayload };
 }

@@ -2,7 +2,7 @@
 // The exported pictures are the same as our decoder output, bit for bit.
 
 import { frameSelector, sliceNal, spsNal, ppsNal } from '../codec/headers.js';
-import { muxMp4 } from './mp4.js';
+import { muxMp4, DataPacker } from './mp4.js';
 
 export const VIDEO_TIMESCALE = 90000;
 
@@ -34,6 +34,7 @@ export class CutRetime {
 
 // Add the frames in session order, then call finish().
 // params: streamParams() of the session. opts.cuts: 'mosh' | 'clean' | an array for each cut.
+// opts.blobChunk (D32): pack the sample data into Blobs of this size (the app); 0: arrays (tests).
 export class Remuxer {
   constructor(params, opts = {}) {
     this.params = params;
@@ -42,6 +43,7 @@ export class Remuxer {
     this.t0 = null;
     this.last = null;
     this.retime = new CutRetime();
+    this.packer = opts.blobChunk ? new DataPacker(opts.blobChunk) : null;
   }
 
   // frame = { type, qp, bits, bitLen, hdrBits, tsUs } (plan §12, frames store).
@@ -64,7 +66,9 @@ export class Remuxer {
       if (t <= this.last.t) t = this.last.t + 1;
       this.last.duration = t - this.last.t;
     }
-    this.last = { data, size: data.length, key: k.key, t, duration: 0 };
+    // With a packer, the data goes into its Blobs, and the sample keeps only its size.
+    if (this.packer) this.packer.add(data);
+    this.last = { data: this.packer ? null : data, size: data.length, key: k.key, t, duration: 0 };
     this.samples.push(this.last);
     return true;
   }
@@ -76,6 +80,7 @@ export class Remuxer {
     const p = this.params;
     const r = muxMp4({
       width: p.w, height: p.h, timescale: VIDEO_TIMESCALE, sps: spsNal(p), pps: ppsNal(), samples: this.samples,
+      ...(this.packer ? { dataParts: this.packer.done() } : {}),
     }, muxOpts);
     return { ...r, samples: this.samples };
   }

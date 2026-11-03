@@ -241,4 +241,23 @@ export const tests = [
       assert(plain.mediaTime === 0 && plain.samples.every((s) => s.cto === 0), 'ordered chunks: no offsets');
     },
   },
+  {
+    name: 'D32: an export with the data packed into Blobs is the same file, byte for byte',
+    async fn() {
+      const sim = simulate({ w: 160, h: 120, script: [{ record: 40, content: 'noise' }, { pause: true }, { record: 30, content: 'square' }] });
+      const bytes = async (parts) => Buffer.concat(await Promise.all(parts.map(async (p) => Buffer.from(p instanceof Blob ? await p.arrayBuffer() : p))));
+      for (const cuts of ['mosh', 'clean']) {
+        const plain = new Remuxer(sim.params, { cuts }), packed = new Remuxer(sim.params, { cuts, blobChunk: 65536 });
+        for (const f of sim.frames) {
+          plain.add(f);
+          packed.add(f);
+        }
+        const a = plain.finish(), b = packed.finish();
+        assert(b.parts.some((p) => p instanceof Blob), 'the packed export has Blobs');
+        assert(b.samples.every((x) => x.data === null), 'the samples do not keep the data');
+        const [ba, bb] = [await bytes(a.parts), await bytes(b.parts)];
+        assert(ba.length === a.size && bb.length === b.size && Buffer.compare(ba, bb) === 0, `${cuts}: the files differ`);
+      }
+    },
+  },
 ];

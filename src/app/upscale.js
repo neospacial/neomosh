@@ -2,7 +2,7 @@
 // and encode them with the H.264 VideoEncoder of the browser. Then mux with our MP4 muxer.
 
 import { frameSelector } from '../codec/headers.js';
-import { muxMp4 } from '../mux/mp4.js';
+import { muxMp4, DataPacker } from '../mux/mp4.js';
 import { VIDEO_TIMESCALE, CutRetime } from '../mux/remux.js';
 import { makeWorker } from './recorder.js';
 
@@ -36,7 +36,9 @@ export async function upscaleConfig(w, h, fps) {
 // Returns { parts, size } (see muxMp4).
 export async function upscaleExport(workerSrc, params, config, frames, opts = {}) {
   const wk = makeWorker(workerSrc);
+  // D32: the encoded data goes into Blobs as it comes; the chunks keep their times, sizes, and flags.
   const chunks = [];
+  const packer = new DataPacker(opts.blobChunk ?? 32 * 1048576);
   let avcc = null;
   let acks = 0;
   let done = false;
@@ -48,7 +50,8 @@ export async function upscaleExport(workerSrc, params, config, frames, opts = {}
     const m = e.data;
     if (m.cmd === 'upChunk') {
       if (m.desc && !avcc) avcc = m.desc;
-      chunks.push(m);
+      packer.add(m.data);
+      chunks.push({ ts: m.ts, key: m.key, size: m.data.length });
     } else if (m.cmd === 'upAck') acks++;
     else if (m.cmd === 'upDone') done = true;
     else if (m.cmd === 'error') failure = new Error(m.message);
@@ -86,7 +89,7 @@ export async function upscaleExport(workerSrc, params, config, frames, opts = {}
   if (!chunks.length || !avcc) throw new Error('The encoder gave no output');
 
   const { samples, mediaTime } = upscaleSamples(chunks, Math.round(VIDEO_TIMESCALE / params.fps));
-  return muxMp4({ width: config.outW, height: config.outH, timescale: VIDEO_TIMESCALE, avcc, samples, mediaTime });
+  return muxMp4({ width: config.outW, height: config.outH, timescale: VIDEO_TIMESCALE, avcc, samples, mediaTime, dataParts: packer.done() });
 }
 
 // The MP4 samples of the encoder chunks (decode order). Times from rounded absolute times, as in
@@ -103,7 +106,7 @@ export function upscaleSamples(chunks, lastDuration) {
   let mediaTime = 0;
   for (let i = 0; i < pts.length; i++) mediaTime = Math.max(mediaTime, sorted[i] - pts[i]);
   const samples = chunks.map((c, i) => ({
-    data: c.data, size: c.data.length, key: c.key,
+    data: c.data || null, size: c.size ?? c.data.length, key: c.key,
     duration: i + 1 < sorted.length ? sorted[i + 1] - sorted[i] : lastDuration,
     cto: pts[i] - sorted[i] + mediaTime,
   }));

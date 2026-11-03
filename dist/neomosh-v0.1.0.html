@@ -3335,7 +3335,7 @@ return { DEFAULT_SETTINGS, SETTING_VALUES, checkSettings, Encoder };
 })();
 
 // ---- mux/mp4.js
-const { avcC, muxMp4 } = (() => {
+const { avcC, DataPacker, muxMp4 } = (() => {
 // MP4 muxer (plan §9.4). Video only (no audio: D20).
 // Layout: ftyp, moov, mdat. The moov comes first, so all sample sizes must be known first.
 // R-27: the file is returned as a list of parts (for a Blob). There is no one large buffer.
@@ -3490,11 +3490,47 @@ function chunkOffsets(offsets, use64) {
   return fullBox(use64 ? 'co64' : 'stco', 0, 0, b);
 }
 
+// R-27, D32: the sample data of an export, packed into Blobs of about chunkBytes as it comes. A Blob
+// can be kept by the browser out of the JavaScript memory (on disk when it is large), so a long export
+// does not hold all its data in RAM. chunkBytes 0: no packing (the arrays, for tests).
+class DataPacker {
+  constructor(chunkBytes = 0) {
+    this.chunk = chunkBytes;
+    this.parts = [];
+    this.pending = [];
+    this.pendingBytes = 0;
+  }
+
+  add(data) {
+    if (!this.chunk) {
+      this.parts.push(data);
+      return;
+    }
+    this.pending.push(data);
+    this.pendingBytes += data.length;
+    if (this.pendingBytes >= this.chunk) this.flush();
+  }
+
+  flush() {
+    if (!this.pending.length) return;
+    this.parts.push(new Blob(this.pending));
+    this.pending = [];
+    this.pendingBytes = 0;
+  }
+
+  // The parts in file order (Blobs and arrays).
+  done() {
+    this.flush();
+    return this.parts;
+  }
+}
+
 // Make the MP4 file.
 // video = { width, height, timescale, sps, pps, samples: [{ data: Uint8Array | Blob, size, duration, key, cto }] }
 // The samples are in decode order. duration: the decode time to the next sample. cto (optional): the
 // composition offset (display time - decode time, >= 0). video.mediaTime: the edit list start (the
-// largest delay), when the samples have composition offsets.
+// largest delay), when the samples have composition offsets. video.dataParts (optional): the sample
+// data in file order (from a DataPacker); then the samples need only their sizes.
 // opts.chunkDuration: chunk length in timescale units (default 1 s).
 // opts.forceCo64, opts.forceLargeMdat: for tests only.
 // Returns { parts, size }. parts: Uint8Array headers and the sample data, in file order.
@@ -3566,11 +3602,12 @@ function muxMp4(video, opts = {}) {
   if (!opts.forceCo64 && r.lastOffset > 0xffffffff) r = build(true);
 
   const parts = [head, r.moov, mdatHeader];
-  for (const s of samples) parts.push(s.data);
+  if (video.dataParts) parts.push(...video.dataParts);
+  else for (const s of samples) parts.push(s.data);
   return { parts, size: head.length + r.moov.length + mdatHeader.length + mdatPayload };
 }
 
-return { avcC, muxMp4 };
+return { avcC, DataPacker, muxMp4 };
 })();
 
 // ---- mux/remux.js
@@ -3611,6 +3648,7 @@ class CutRetime {
 
 // Add the frames in session order, then call finish().
 // params: streamParams() of the session. opts.cuts: 'mosh' | 'clean' | an array for each cut.
+// opts.blobChunk (D32): pack the sample data into Blobs of this size (the app); 0: arrays (tests).
 class Remuxer {
   constructor(params, opts = {}) {
     this.params = params;
@@ -3619,6 +3657,7 @@ class Remuxer {
     this.t0 = null;
     this.last = null;
     this.retime = new CutRetime();
+    this.packer = opts.blobChunk ? new DataPacker(opts.blobChunk) : null;
   }
 
   // frame = { type, qp, bits, bitLen, hdrBits, tsUs } (plan §12, frames store).
@@ -3641,7 +3680,9 @@ class Remuxer {
       if (t <= this.last.t) t = this.last.t + 1;
       this.last.duration = t - this.last.t;
     }
-    this.last = { data, size: data.length, key: k.key, t, duration: 0 };
+    // With a packer, the data goes into its Blobs, and the sample keeps only its size.
+    if (this.packer) this.packer.add(data);
+    this.last = { data: this.packer ? null : data, size: data.length, key: k.key, t, duration: 0 };
     this.samples.push(this.last);
     return true;
   }
@@ -3653,6 +3694,7 @@ class Remuxer {
     const p = this.params;
     const r = muxMp4({
       width: p.w, height: p.h, timescale: VIDEO_TIMESCALE, sps: spsNal(p), pps: ppsNal(), samples: this.samples,
+      ...(this.packer ? { dataParts: this.packer.done() } : {}),
     }, muxOpts);
     return { ...r, samples: this.samples };
   }
@@ -4996,7 +5038,9 @@ async function upscaleConfig(w, h, fps) {
 // Returns { parts, size } (see muxMp4).
 async function upscaleExport(workerSrc, params, config, frames, opts = {}) {
   const wk = makeWorker(workerSrc);
+  // D32: the encoded data goes into Blobs as it comes; the chunks keep their times, sizes, and flags.
   const chunks = [];
+  const packer = new DataPacker(opts.blobChunk ?? 32 * 1048576);
   let avcc = null;
   let acks = 0;
   let done = false;
@@ -5008,7 +5052,8 @@ async function upscaleExport(workerSrc, params, config, frames, opts = {}) {
     const m = e.data;
     if (m.cmd === 'upChunk') {
       if (m.desc && !avcc) avcc = m.desc;
-      chunks.push(m);
+      packer.add(m.data);
+      chunks.push({ ts: m.ts, key: m.key, size: m.data.length });
     } else if (m.cmd === 'upAck') acks++;
     else if (m.cmd === 'upDone') done = true;
     else if (m.cmd === 'error') failure = new Error(m.message);
@@ -5046,7 +5091,7 @@ async function upscaleExport(workerSrc, params, config, frames, opts = {}) {
   if (!chunks.length || !avcc) throw new Error('The encoder gave no output');
 
   const { samples, mediaTime } = upscaleSamples(chunks, Math.round(VIDEO_TIMESCALE / params.fps));
-  return muxMp4({ width: config.outW, height: config.outH, timescale: VIDEO_TIMESCALE, avcc, samples, mediaTime });
+  return muxMp4({ width: config.outW, height: config.outH, timescale: VIDEO_TIMESCALE, avcc, samples, mediaTime, dataParts: packer.done() });
 }
 
 // The MP4 samples of the encoder chunks (decode order). Times from rounded absolute times, as in
@@ -5063,7 +5108,7 @@ function upscaleSamples(chunks, lastDuration) {
   let mediaTime = 0;
   for (let i = 0; i < pts.length; i++) mediaTime = Math.max(mediaTime, sorted[i] - pts[i]);
   const samples = chunks.map((c, i) => ({
-    data: c.data, size: c.data.length, key: c.key,
+    data: c.data || null, size: c.size ?? c.data.length, key: c.key,
     duration: i + 1 < sorted.length ? sorted[i + 1] - sorted[i] : lastDuration,
     cto: pts[i] - sorted[i] + mediaTime,
   }));
@@ -6568,6 +6613,7 @@ async function runExport() {
   try {
     await rec.store.flush();
     const opts = {
+      blobChunk: 32 * 1048576, // D32: the data in Blobs of 32 MB, not all in RAM
       cuts: cutModes.slice(),
       smooth: expSmooth,
       signal: exportCtl.signal,
