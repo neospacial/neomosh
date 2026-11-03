@@ -73,7 +73,34 @@
     </div>
     <div id="controls">
       <button id="thumbBtn" type="button" aria-label="History"><img id="thumbImg" alt=""></button>
-      <button id="shutter" type="button" aria-label="Record"><span id="core"></span></button>
+      <button id="shutter" type="button" aria-label="Record">
+        <!-- D27: the orb (from neoascii v1.0.13, orb-button v1.1.0), Default theme, when not recording. -->
+        <span class="orb" aria-hidden="true">
+          <svg width="100" height="100" viewBox="0 0 100 100">
+            <defs>
+              <linearGradient id="orbGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset=".3" class="s1"></stop>
+                <stop offset=".7" class="s2"></stop>
+              </linearGradient>
+              <filter id="orbBlur" filterUnits="userSpaceOnUse" x="-50" y="-50" width="200" height="200">
+                <feGaussianBlur stdDeviation="7"></feGaussianBlur>
+              </filter>
+              <mask id="orbMask" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100">
+                <g class="orbTri" fill="white">
+                  <polygon filter="url(#orbBlur)" points="25,25 75,25 50,75"></polygon>
+                  <polygon filter="url(#orbBlur)" points="50,25 75,75 25,75"></polygon>
+                  <polygon filter="url(#orbBlur)" points="35,35 65,35 50,65"></polygon>
+                  <polygon filter="url(#orbBlur)" points="35,35 65,35 50,65"></polygon>
+                  <polygon filter="url(#orbBlur)" points="35,35 65,35 50,65"></polygon>
+                  <polygon filter="url(#orbBlur)" points="35,35 65,35 50,65"></polygon>
+                </g>
+              </mask>
+            </defs>
+            <rect width="100" height="100" fill="url(#orbGrad)" mask="url(#orbMask)"></rect>
+          </svg>
+        </span>
+        <span id="core"></span>
+      </button>
       <button id="bloomBtn" type="button" aria-label="Bloom (hold)" aria-pressed="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c1.4 2.2 1.4 4.6 0 6.8-1.4-2.2-1.4-4.6 0-6.8zm0 13.2c1.4 2.2 1.4 4.6 0 6.8-1.4-2.2-1.4-4.6 0-6.8zM2 12c2.2-1.4 4.6-1.4 6.8 0-2.2 1.4-4.6 1.4-6.8 0zm13.2 0c2.2-1.4 4.6-1.4 6.8 0-2.2 1.4-4.6 1.4-6.8 0zM4.9 4.9c2.5.6 4.2 2.3 4.8 4.8-2.5-.6-4.2-2.3-4.8-4.8zm9.4 9.4c2.5.6 4.2 2.3 4.8 4.8-2.5-.6-4.2-2.3-4.8-4.8zM4.9 19.1c.6-2.5 2.3-4.2 4.8-4.8-.6 2.5-2.3 4.2-4.8 4.8zm9.4-9.4c.6-2.5 2.3-4.2 4.8-4.8-.6 2.5-2.3 4.2-4.8 4.8zM12 10a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/></svg>
         <span>BLOOM</span>
@@ -100,7 +127,6 @@
     <div class="group">
       <div class="row"><span>Size</span><div class="seg" data-key="size"><button data-v="360">360</button><button data-v="480">480</button><button data-v="720">720</button><button data-v="1080">1080</button></div></div>
       <div class="row"><span>Frame rate</span><div class="seg" data-key="fps"><button data-v="15">15</button><button data-v="24">24</button><button data-v="30">30</button></div></div>
-      <p class="hint warn" id="fpsHint" hidden></p>
       <p class="hint" id="lockHint">Size, frame rate, and shape lock at the first recorded frame.</p>
     </div>
     <div class="group" id="encGroup">
@@ -116,7 +142,17 @@
       <div class="row"><span>Mosh preview</span><div class="seg" data-key="preview"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
       <div class="row"><span>Mirror front camera</span><div class="seg" data-key="mirror"><button data-v="1">On</button><button data-v="0">Off</button></div></div>
     </div>
-    <div class="group info"><div id="info"></div><div id="storageInfo"></div></div>
+    <div class="group">
+      <div class="row"><span>Theme</span><div class="seg" data-key="theme"><button data-v="default">Default</button><button data-v="os">OS</button><button data-v="contrast">Contrast</button><button data-v="night">Night</button></div></div>
+    </div>
+    <details class="group info" id="infoBox">
+      <summary><span>Info</span><span id="infoWarn" hidden>Frame rate</span></summary>
+      <p class="hint warn" id="fpsHint" hidden></p>
+      <p id="infoMethod"></p>
+      <p id="infoDrops"></p>
+      <p id="storageInfo"></p>
+      <p id="info" hidden></p>
+    </details>
     <div class="group" id="debugGroup" hidden>
       <div class="actions"><button id="selfTest" type="button">Run the self-test</button></div>
       <p class="hint" id="selfTestOut">Exports this video, decodes it with the browser decoder, and compares each frame with the neomosh decoder (plan §13.3).</p>

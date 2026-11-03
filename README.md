@@ -41,8 +41,9 @@ Touch the gear (top left).
 | Heal | Off, Low, High | Off | While paused. Low and High repair bad areas (partial mosh) |
 | Mosh preview | On, Off | On | At any time. Off shows the raw source while recording |
 | Mirror front camera | On, Off | On | At any time. Applies to the next clip |
+| Theme | Default (green and pink, an animated orb record button), OS (yellow and red), Contrast (white, outlines), Night (soft warm colours) | Default | At any time. Only the look of the app, not the video |
 
-The encoder settings apply to the next clip. Each clip keeps its own look. A revert also restores the settings of that pause point. **Default look** sets the encoder settings to their defaults. The info section shows the encoder time for each frame, the dropped frames, and the storage used and free.
+The encoder settings apply to the next clip. Each clip keeps its own look. A revert also restores the settings of that pause point. **Default look** sets the encoder settings to their defaults. The **Info** section at the bottom (closed at first) shows the dropped frames, the storage used and free, and how this browser records. When the device is too slow for the selected size and frame rate, it shows a warning; the warning comes only after the first clip, when the speed is measured. Open the page with `#debug` for the details and the self-test.
 
 ## Browser support
 

@@ -25,7 +25,7 @@ const el = {
   player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
   newVideo: $('newVideo'), confirmTitle: $('confirmTitle'), confirmText: $('confirmText'),
   confirmYes: $('confirmYes'), confirmNo: $('confirmNo'),
-  sheetBack: $('sheetBack'), info: $('info'), lockHint: $('lockHint'), fpsHint: $('fpsHint'), storageInfo: $('storageInfo'),
+  sheetBack: $('sheetBack'), info: $('info'), infoMethod: $('infoMethod'), infoDrops: $('infoDrops'), infoWarn: $('infoWarn'), lockHint: $('lockHint'), fpsHint: $('fpsHint'), storageInfo: $('storageInfo'),
   qp: $('qp'), qpVal: $('qpVal'), skipBias: $('skipBias'), skipVal: $('skipVal'), encReset: $('encReset'),
   bloomBtn: $('bloomBtn'),
   debugGroup: $('debugGroup'), selfTest: $('selfTest'), selfTestOut: $('selfTestOut'),
@@ -51,6 +51,7 @@ const S = {
   fps: 30,
   preview: true,
   mirrorFront: true,
+  theme: 'default', // D26: default, os, contrast, night
   enc: { ...DEFAULT_SETTINGS }, // the encoder settings for the next video (plan §7.2)
   stream: null,
   hasVideo: false,
@@ -66,10 +67,18 @@ try {
 } catch {
   /* no stored preferences */
 }
+// D26: the UI theme (colours only), on <html> so that the whole page uses it.
+const THEMES = ['default', 'os', 'contrast', 'night'];
+function applyTheme() {
+  if (!THEMES.includes(S.theme)) S.theme = 'default';
+  document.documentElement.dataset.theme = S.theme;
+}
+applyTheme();
+
 function savePrefs() {
   try {
-    const { aspect, size, fps, preview, mirrorFront, enc } = S;
-    localStorage.setItem(PREF_KEY, JSON.stringify({ aspect, size, fps, preview, mirrorFront, enc }));
+    const { aspect, size, fps, preview, mirrorFront, enc, theme } = S;
+    localStorage.setItem(PREF_KEY, JSON.stringify({ aspect, size, fps, preview, mirrorFront, enc, theme }));
   } catch {
     /* storage not available */
   }
@@ -456,6 +465,7 @@ function onDecoded(bitmap) {
 function onPaused(bitmap, thumb) {
   // D17: measure the speed of this device (only after a clip of some length).
   if (rec && rec.session && rec.encMs && rec.clipFrames > 10) {
+    speedMeasured = true;
     const mp = (rec.session.w * rec.session.h) / 1e6;
     saveSpeed(rec.captureMode === 'worker' && rec.capMs ? { enc: rec.encMs / mp, cap: rec.capMs / mp } : { enc: rec.encMs / mp });
   }
@@ -867,7 +877,7 @@ function updateSettingsSheet() {
   const locked = sessionLocked();
   const edit = canEdit(); // R-12: while recording, the values show but do not change
   const enc = encSettings();
-  const val = { size: S.size, fps: S.fps, preview: S.preview ? 1 : 0, mirror: S.mirrorFront ? 1 : 0, ...enc };
+  const val = { size: S.size, fps: S.fps, preview: S.preview ? 1 : 0, mirror: S.mirrorFront ? 1 : 0, theme: S.theme, ...enc };
   if (locked) {
     val.size = Math.min(rec.session.w, rec.session.h);
     val.fps = rec.session.fps;
@@ -888,6 +898,12 @@ function updateSettingsSheet() {
     ? 'Size and frame rate are locked for this video.'
     : 'Size, frame rate, and shape lock at the first recorded frame.';
   updateFpsHint();
+  // The info section (D26): what is relevant to the user. The details are for #debug only.
+  el.infoMethod.textContent = methodPhrase();
+  el.infoDrops.textContent = rec && rec.hasFrames
+    ? `Dropped frames: ${rec.drops}${rec.clipDrops && rec.clipDrops !== rec.drops ? ` (${rec.clipDrops} in the last clip)` : ''}.`
+    : 'Dropped frames: none yet.';
+  el.info.hidden = !HASH.has('debug');
   if (rec) {
     const worker = rec.captureMode === 'worker' && rec.capMs;
     el.info.textContent = (worker
@@ -903,6 +919,26 @@ function updateSettingsSheet() {
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }
+}
+
+// One plain sentence: how this browser records (D26). From the last clip, else from the measurement
+// before the recording (camera), else what the next recording will try.
+function methodPhrase() {
+  const wasm = rec && rec.wasm !== undefined ? rec.wasm : true;
+  const coder = wasm ? 'the fast WebAssembly encoder' : 'the slower JavaScript encoder (this browser has no WebAssembly SIMD)';
+  const mode = rec && rec.captureMode;
+  let how;
+  if (S.source === 'file' && mode !== 'page') how = 'decodes each frame of an MP4 or MOV file, so no frame is dropped';
+  else if (mode === 'page') how = S.source === 'file' ? 'plays the file in real time' : 'takes the camera frames on the main page, which is slower';
+  else {
+    const preset = rec && rec.capPreset ? rec.capPreset.method : (capStore()[capKey()] || {}).method;
+    const m = (rec && rec.captureMode === 'worker' && rec.capMethod ? rec.capMethod.split(';')[0] : null) || preset;
+    how = m === 'yuv' ? 'reads the raw camera frames directly, the fastest way'
+      : m === 'bitmap' ? 'scales the camera frames with the graphics chip'
+        : m === 'draw' ? 'scales the camera frames in a background worker'
+          : 'reads the camera in a background worker';
+  }
+  return `${browserName()} ${how}, and uses ${coder}.`;
 }
 
 // The browser name and version, for the info section (the capture path depends on the browser).
@@ -924,7 +960,16 @@ function frameMs() {
 }
 
 // D17: a hint when the frame rate is more than this device can hold at this size.
+// D17, D26: the hint shows only after a clip was recorded since the app opened (the speed of this
+// device with the way that is in use now is then known), and not for a file (D25: no drops).
+let speedMeasured = false;
+
 function updateFpsHint() {
+  const show = (on) => {
+    el.fpsHint.hidden = !on;
+    el.infoWarn.hidden = !on;
+  };
+  if (!speedMeasured || S.source === 'file') return show(false);
   const sp = loadSpeed();
   const { w, h } = pictureSize();
   const mp = (w * h) / 1e6;
@@ -935,15 +980,11 @@ function updateFpsHint() {
   const capt = probe && probe.ms ? probe.ms : sp.cap ? sp.cap * mp : 0;
   const est = Math.max(enc, capt);
   const fits = (f) => est <= 0.85 * (1000 / f);
-  if (!est || fits(fps)) {
-    el.fpsHint.hidden = true;
-    return;
-  }
+  if (!est || fits(fps)) return show(false);
   const lower = [24, 15].filter((f) => f < fps && fits(f));
-  el.fpsHint.textContent = `${Math.min(w, h)} at ${fps} fps can drop frames on this device (about ${est.toFixed(0)} ms for each frame: ` +
-    `encoder ${enc ? enc.toFixed(0) : '–'}, capture ${capt ? capt.toFixed(0) : '–'}). ` +
+  el.fpsHint.textContent = `${Math.min(w, h)} at ${fps} fps can drop frames on this device. ` +
     (lower.length ? `${lower.join(' or ')} fps is safer.` : 'A smaller size is safer.');
-  el.fpsHint.hidden = false;
+  show(true);
 }
 
 // R-26: warn when free storage is low (at each pause).
@@ -977,6 +1018,10 @@ document.querySelectorAll('#settingsSheet .seg button').forEach((b) => {
     if (k === 'fps' && !sessionLocked()) S.fps = Number(v);
     if (k === 'preview') S.preview = v === '1';
     if (k === 'mirror') S.mirrorFront = v === '1'; // a change while paused applies to the next clip
+    if (k === 'theme') {
+      S.theme = v;
+      applyTheme();
+    }
     savePrefs();
     relayout();
     refreshUI();
