@@ -43,6 +43,7 @@ const PREF_KEY = 'neomosh.prefs';
 const S = {
   source: 'camera', // or 'file' (plan §11.5)
   fileUrl: '',
+  file: null, // the File of the file source (D25)
   facing: 'environment',
   aspect: '4:3',
   orient: 'auto', // auto, v, or h
@@ -507,12 +508,11 @@ async function shutter() {
   const { w, h } = pictureSize();
   el.shutter.disabled = true;
   try {
-    rec.setSource(activeVideo(), S.source);
+    rec.setSource(activeVideo(), S.source, S.file);
     await rec.record({ w, h, fps: S.fps, aspect: S.aspect, orient: isPortrait() ? 'v' : 'h', mirror: mirrored() });
-    // Plan §11.5 step 4: the file plays at normal speed (R-32).
-    if (S.source === 'file' && rec.state === ST.RECORDING) {
-      await fv.play().catch(() => rec.pause('The video file did not play.'));
-    }
+    // Plan §11.5 step 4: the file plays at normal speed (R-32), when it is on the page path. D25: the
+    // capture worker reads the file itself (no real time); the <video> stays still.
+    if (S.source === 'file' && rec.state === ST.RECORDING && rec.captureMode !== 'file') playFile();
   } catch (e) {
     toast('The recording did not start: ' + (e && e.message));
   }
@@ -520,6 +520,24 @@ async function shutter() {
 }
 
 /* ---------------- file source (plan §11.5) ---------------- */
+
+function playFile() {
+  el.fileVideo.play().catch(() => rec && rec.pause('The video file did not play.'));
+}
+
+// D25: the file position while the capture worker reads the file (the <video> does not move).
+function onFileTime(us, durationUs) {
+  const d = el.fileVideo.duration || durationUs / 1e6;
+  if (!fileScrubbing && d) el.fileScrub.value = Math.round((1000 * us) / 1e6 / d);
+  el.fileTime.textContent = `${formatTime(us)} / ${formatTime(d * 1e6)}`;
+}
+
+// D25: a file clip ended: the file position goes to the frame after its last frame.
+function onFileStopped(nextUs, ended) {
+  const v = el.fileVideo;
+  if (v.duration) v.currentTime = Math.min(v.duration, ended ? v.duration : nextUs / 1e6);
+  updateFileBar();
+}
 
 function setSource(kind) {
   const st = state();
@@ -533,7 +551,7 @@ function setSource(kind) {
     const p = el.preview.play();
     if (p && p.catch) p.catch(() => {});
   } else el.preview.pause();
-  if (rec) rec.setSource(activeVideo(), kind);
+  if (rec) rec.setSource(activeVideo(), kind, S.file);
   updateFileBar();
   refreshUI();
   layoutFrame();
@@ -559,6 +577,7 @@ async function openFile(file) {
   }
   if (S.fileUrl) URL.revokeObjectURL(S.fileUrl);
   S.fileUrl = url;
+  S.file = file; // D25: the capture worker reads this file
   v.pause();
   hideGate();
   setSource('file');
@@ -673,6 +692,8 @@ function refreshUI() {
   el.srcCamera.disabled = el.srcFile.disabled = !idleOrPaused;
   el.srcCamera.classList.toggle('active', S.source === 'camera');
   el.srcFile.classList.toggle('active', S.source === 'file');
+  // D25: a file clip in the capture worker: the <video> does not move, so the view shows the decoded output.
+  el.body.dataset.capture = rec && st === ST.RECORDING ? rec.captureMode || '' : '';
   // D24: Bloom while paused, when there are frames; held down while blooming.
   el.bloomBtn.disabled = !rec || !rec.hasFrames || (st !== ST.PAUSED && st !== ST.BLOOMING);
   el.shutter.setAttribute('aria-label', st === ST.RECORDING ? 'Pause' : st === ST.PAUSED ? 'Resume' : 'Record');
@@ -878,7 +899,7 @@ function updateSettingsSheet() {
       `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops; ` +
       `view skipped ${rec.viewSkips || 0}, the file has these frames). ` +
       `Frames: ${rec.frameCount}${rec.bloomFrames ? ` (bloom ${rec.bloomFrames} in this clip)` : ''}. ` +
-      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
+      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'file' ? 'file (each frame decoded, not real time)' : rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }
@@ -1139,6 +1160,7 @@ async function start(fresh) {
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: {
         state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000),
+        filePlay: playFile, fileTime: onFileTime, fileStopped: onFileStopped,
         bloom: (on) => {
           el.bloomBtn.classList.toggle('on', on);
           el.bloomBtn.setAttribute('aria-pressed', String(on));

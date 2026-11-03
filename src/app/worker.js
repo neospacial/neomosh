@@ -8,6 +8,7 @@ import { Decoder } from '../codec/decoder.js';
 import { coverCrop } from './geometry.js';
 import { FrameGate, SourceGaps } from './capture.js';
 import { CamYuv } from './camyuv.js';
+import { demuxMp4, turnedCrop } from '../mux/demux.js';
 
 const MAX_IN_FLIGHT = 6; // R-18 (D19), the same as the main thread path
 
@@ -119,6 +120,131 @@ async function canvasPicture(frame, c, mirror, method) {
     bitmap.close();
   } else ctx.drawImage(frame, c.sx, c.sy, c.sw, c.sh, 0, 0, w, h);
   return ctx.getImageData(0, 0, w, h).data;
+}
+
+/* File source without real time (D25). The capture worker reads the MP4/MOV file, decodes every frame
+   with a VideoDecoder, and sends each frame of the target rate to the encoder. When the encoder is
+   busy, it waits: no frame is dropped. The frame times come from the file (media time), so the export
+   has the speed of the file, at any decode speed. */
+let fileDemux = null; // { key, d } for the last file
+
+async function fileInfo(file) {
+  const key = `${file.name}|${file.size}|${file.lastModified}`;
+  if (fileDemux && fileDemux.key === key) return fileDemux.d;
+  const d = await demuxMp4(file);
+  let ok = false;
+  if (d && typeof VideoDecoder === 'function') {
+    try {
+      ok = (await VideoDecoder.isConfigSupported(decoderConfig(d))).supported;
+    } catch {
+      ok = false;
+    }
+  }
+  fileDemux = { key, d: ok ? d : null };
+  return fileDemux.d;
+}
+
+const decoderConfig = (d) => ({ codec: d.codec, codedWidth: d.codedWidth, codedHeight: d.codedHeight, ...(d.description ? { description: d.description } : {}) });
+
+// m: { file, startUs (file time), fps, sessionEndUs, seq }. Posts 'capStopped' with ended and the
+// file time of the last frame (lastUs), or 'capFileFail' (then the page path plays the file).
+async function fileClip(m, run) {
+  const d = await fileInfo(m.file);
+  if (!d) {
+    self.postMessage({ cmd: 'capFileFail' });
+    return;
+  }
+  const S = d.samples;
+  const period = 1e6 / m.fps;
+  // Start at the last sync sample at or before the start time (decode order).
+  let first = 0;
+  for (let i = 0; i < S.length; i++) if (S[i].key && S[i].us <= m.startUs + 1000) first = i;
+  const out = [];
+  let failure = null, wake = null;
+  const poke = () => { if (wake) { const f = wake; wake = null; f(); } };
+  const wait = () => new Promise((r) => (wake = r));
+  cap.onAck = poke;
+  const dec = new VideoDecoder({ output: (f) => { out.push(f); poke(); }, error: (e) => { failure = e; poke(); } });
+  dec.configure(decoderConfig(d));
+  const gate = new FrameGate(m.fps);
+  let next = first, flushed = false, start = null, sent = 0, seq = m.seq, lastUs = m.startUs, ended = false, lastPost = 0;
+  // Read the samples in runs of up to 4 MB that are next to each other in the file.
+  let buf = null, bufFrom = 0, bufTo = 0;
+  const readAt = async (s) => {
+    if (!buf || s.offset < bufFrom || s.offset + s.size > bufTo) {
+      let to = s.offset + s.size;
+      for (let j = next + 1; j < S.length && S[j].offset === to && to - s.offset < 4194304; j++) to += S[j].size;
+      buf = new Uint8Array(await m.file.slice(s.offset, to).arrayBuffer());
+      [bufFrom, bufTo] = [s.offset, to];
+    }
+    return buf.subarray(s.offset - bufFrom, s.offset - bufFrom + s.size);
+  };
+  try {
+    for (;;) {
+      if (run !== cap.run) break;
+      if (failure) throw failure;
+      // Feed the decoder: a few frames ahead, no more.
+      while (next < S.length && dec.decodeQueueSize < 4 && out.length < 4) {
+        const s = S[next];
+        dec.decode(new EncodedVideoChunk({ type: s.key ? 'key' : 'delta', timestamp: s.us, data: await readAt(s) }));
+        next++;
+      }
+      if (next >= S.length && !flushed) {
+        flushed = true;
+        await dec.flush();
+      }
+      if (!out.length) {
+        if (flushed) {
+          ended = true;
+          break;
+        }
+        await wait();
+        continue;
+      }
+      const frame = out.shift();
+      const us = frame.timestamp;
+      // Before the start (from the sync sample), or not on the target rate: not used.
+      if (us < m.startUs - period / 2 || !gate.next(us / 1000).keep) {
+        frame.close();
+        continue;
+      }
+      // No drop: wait for the encoder.
+      while (cap.inFlight >= MAX_IN_FLIGHT && run === cap.run && !failure) await wait();
+      if (run !== cap.run) {
+        frame.close();
+        break;
+      }
+      const t0 = performance.now();
+      if (start === null) start = us;
+      // The crop in display coordinates (the file turned as a player shows it), then the frame area.
+      const fw = frame.displayWidth, fh = frame.displayHeight;
+      const turned = d.rotation % 180 !== 0;
+      const c = coverCrop(turned ? fh : fw, turned ? fw : fh, w, h);
+      const t = turnedCrop(d.rotation, fw, fh, c, w, h);
+      ctx.setTransform(...t.m);
+      ctx.drawImage(frame, t.sx, t.sy, t.sw, t.sh, 0, 0, t.dw, t.dh);
+      frame.close();
+      const rgba = ctx.getImageData(0, 0, w, h).data;
+      cap.inFlight++;
+      sent++;
+      lastUs = us;
+      const ms = performance.now() - t0;
+      cap.port.postMessage({ cmd: 'rgba', rgba, tsUs: m.sessionEndUs + (us - start), seq: seq++, grabMs: ms }, [rgba.buffer]);
+      if (performance.now() - lastPost > 200) {
+        lastPost = performance.now();
+        self.postMessage({ cmd: 'fileTime', us, durationUs: d.durationUs });
+      }
+    }
+  } catch (err) {
+    self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: 'file' });
+  } finally {
+    for (const f of out) f.close();
+    try {
+      dec.close();
+    } catch { /* closed */ }
+    cap.onAck = null;
+    self.postMessage({ cmd: 'capStopped', sent, seq, file: true, ended, lastUs });
+  }
 }
 
 // After a stop: cancel the stream when no frame came for 300 ms. Then no frame is in its queue
@@ -256,10 +382,13 @@ const handlers = {
       }
       if (cap.port) {
         cap.port.onmessage = (e) => {
-          if (e.data.cmd === 'ack') cap.inFlight--;
+          if (e.data.cmd === 'ack') {
+            cap.inFlight--;
+            if (cap.onAck) cap.onAck();
+          }
         };
       }
-      self.postMessage({ cmd: 'ready', mstp: typeof MediaStreamTrackProcessor === 'function' });
+      self.postMessage({ cmd: 'ready', mstp: typeof MediaStreamTrackProcessor === 'function', vd: typeof VideoDecoder === 'function' });
       return;
     }
     warmUp();
@@ -295,6 +424,10 @@ const handlers = {
     self.postMessage({ cmd: 'packet', seq: m.seq, tsUs: m.tsUs, pkt, ms: t2 - t0, grabMs: t1 - t0 }, [pkt.bits.buffer]);
   },
   // Capture worker: start and stop one clip.
+  capFileStart(m) {
+    const run = ++cap.run;
+    fileClip(m, run).catch((err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: 'file' }));
+  },
   capStart(m) {
     const run = ++cap.run;
     captureClip(m, run).catch((err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: 'capture' }));
@@ -309,6 +442,7 @@ const handlers = {
   },
   capStop() {
     cap.run++;
+    if (cap.onAck) cap.onAck(); // a file clip that waits for the encoder: it ends now
     if (cap.track) cap.track.stop();
     if (cap.reader) armQuietCancel(cap.reader);
   },

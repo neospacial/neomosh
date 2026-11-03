@@ -71,7 +71,15 @@ export const tests = [
         await h.clip(1500);
         let fs1 = await fileState(page);
         assert(fs1.paused, 'the file must pause with the recording');
-        assert(fs1.t > 1.8 && fs1.t < 3.4, `the file played from 1.0 s to ${fs1.t} s`);
+        // D25: the capture worker decodes the file at its own speed (not real time) and drops no
+        // frame: clip 1 has each file frame from 1.0 s, 1/30 s apart, up to the new file position.
+        assert(fs1.t > 1.5, `the file position moved from 1.0 s to ${fs1.t} s`);
+        const c1 = (await h.db()).frames;
+        for (let i = 1; i < c1.length; i++) assert(Math.abs(c1[i].tsUs - c1[i - 1].tsUs - 33333) <= 1, `file clip: frame ${i} after ${c1[i].tsUs - c1[i - 1].tsUs} us`);
+        assert(Math.abs(c1.length - Math.round((fs1.t - 1.0) * 30)) <= 1, `file clip: ${c1.length} frames for ${(fs1.t - 1.0).toFixed(3)} s of the file`);
+        await page.click('#gearBtn');
+        assert(/Capture: file/.test(await page.$eval('#info', (e) => e.textContent)), 'the file clip is in the capture worker');
+        await page.click('#settingsSheet .done');
         assert(await page.isVisible('#fileBar') && await page.isVisible('#overlay'), 'scrubber and overlay when paused');
         await h.shot('file_paused');
 
@@ -147,6 +155,67 @@ export const tests = [
         assert(m.count === db.frames.length - 1, 'one cut, Mosh');
         const cam = await page.$eval('#srcCamera', (b) => b.click() || document.body.dataset.source);
         assert(cam === 'file', 'without a camera, CAMERA must not switch the source');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
+  {
+    name: 'file without real time (D25): a turned phone file records as a player shows it; WebM plays in real time',
+    async fn() {
+      if (!chromium) return console.log('      (skipped: Playwright is not available)');
+      // Display picture: 480x640 (portrait), red at the top left, blue at the bottom right. It is
+      // stored turned (640x480) with a rotation, as phones do.
+      const disp = path.join(OUT_DIR, 'turn_disp.mp4'), stored = path.join(OUT_DIR, 'turn_stored.mp4'), turned = path.join(OUT_DIR, 'turn.mp4');
+      const draw = 'color=c=gray:size=480x640:rate=30:duration=3,drawbox=x=0:y=0:w=200:h=260:color=red:t=fill,' +
+        'drawbox=x=280:y=380:w=200:h=260:color=blue:t=fill,noise=alls=6:allf=t';
+      run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', draw, '-c:v', 'libx264', '-pix_fmt', 'yuv420p', disp]);
+      // transpose=2: 90 degrees counterclockwise; a player turns it 90 degrees clockwise back.
+      run('ffmpeg', ['-v', 'error', '-y', '-i', disp, '-vf', 'transpose=2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', stored]);
+      run('ffmpeg', ['-v', 'error', '-y', '-display_rotation', '270', '-i', stored, '-c', 'copy', turned]);
+      const webm = path.join(OUT_DIR, 'turn.webm');
+      run('ffmpeg', ['-v', 'error', '-y', '-i', disp, '-c:v', 'libvpx', '-b:v', '1M', webm]);
+      const h = await openApp('turn');
+      try {
+        const { page } = h;
+        await h.start();
+        await pickFile(page, turned);
+        const vw = await page.$eval('#fileVideo', (v) => [v.videoWidth, v.videoHeight].join('x'));
+        assert(vw === '480x640', `the <video> shows the file turned: ${vw}`);
+        await page.click('.ratio[data-a="4:3"]');
+        await h.clip(1000);
+        await page.click('#gearBtn');
+        const info = await page.$eval('#info', (e) => e.textContent);
+        await page.click('#settingsSheet .done');
+        assert(/Capture: file/.test(info), `the turned file is in the capture worker: ${info}`);
+        // WebM: not an MP4/MOV file -> real time (the page path), and it still records.
+        await pickFile(page, webm);
+        await h.clip(1000);
+        await page.click('#gearBtn');
+        const info2 = await page.$eval('#info', (e) => e.textContent);
+        await page.click('#settingsSheet .done');
+        assert(/Capture: page \(file: not an MP4\/MOV/.test(info2), `WebM: real time: ${info2}`);
+        const db = await h.db();
+        const s = db.sessions[0];
+        assert(s.w < s.h, `a portrait session for a portrait file: ${s.w}x${s.h}`);
+        const c = checkMp4(await h.exportMp4('turn_clean.mp4', 'clean'), s.w, s.h);
+        // Both clips: red at the top left, blue at the bottom right (the turn is right).
+        const region = (f, x0, y0) => {
+          const fr = c.frame(f), n = s.w * s.h, cw = s.w / 2;
+          let u = 0, v = 0, k = 0;
+          for (let y = y0; y < y0 + 20; y++) for (let x = x0; x < x0 + 20; x++, k++) {
+            u += fr[n + y * cw + x];
+            v += fr[n * 1.25 + y * cw + x];
+          }
+          return [u / k, v / k];
+        };
+        const cw = s.w / 2, ch = s.h / 2;
+        for (const f of [3, db.points[1].frameIndex + 3]) {
+          const [tlU, tlV] = region(f, 10, 10), [brU, brV] = region(f, cw - 30, ch - 30);
+          assert(tlV > 180 && tlU < 120, `frame ${f}: top left is not red (U ${tlU.toFixed(0)}, V ${tlV.toFixed(0)})`);
+          assert(brU > 180 && brV < 140, `frame ${f}: bottom right is not blue (U ${brU.toFixed(0)}, V ${brV.toFixed(0)})`);
+        }
         assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
       } finally {
         await h.close();
