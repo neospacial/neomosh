@@ -467,6 +467,7 @@ const handlers = {
     warmUp();
     if (m.role === 'enc') {
       enc = new Encoder(m.w, m.h, m.settings);
+      if (m.pcmI) enc.debug.pcmI = true; // address option ipcm=1
       if (m.port) {
         capPort = m.port;
         capPort.onmessage = (e) => {

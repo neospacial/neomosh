@@ -36,7 +36,8 @@ const el = {
 };
 
 // Debug options in the address: #debug (the self-test), capture=yuv|bitmap|draw (the crop way of the
-// capture worker, D22). Example: #debug&capture=yuv
+// capture worker, D22), gpu=0 (the live view by bitmaps, as before D31), ipcm=1 (I_PCM I-frames, as
+// before D33). Example: #debug&capture=yuv&gpu=0
 const HASH = new URLSearchParams(location.hash.slice(1));
 
 // D30: compile the WebAssembly module now, once for all workers (it does not block the page).
@@ -1364,6 +1365,7 @@ async function start(fresh) {
   if (!rec) {
     rec = new Recorder({
       captureMethod: HASH.get('capture'),
+      debugOpts: { gpu: HASH.get('gpu') !== '0', pcmI: HASH.get('ipcm') === '1' },
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: {
         state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000),

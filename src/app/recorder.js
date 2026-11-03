@@ -47,7 +47,9 @@ function methodText(m) {
 // Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
 export class Recorder {
   // captureMethod: force the crop way of the capture worker ('yuv', 'bitmap', 'draw'; debug, D22).
-  constructor({ workerSrc, store, video, on, captureMethod }) {
+  // debugOpts (address options): { gpu: false (the live view by bitmaps), pcmI: true (I_PCM I-frames) }.
+  constructor({ workerSrc, store, video, on, captureMethod, debugOpts }) {
+    this.debugOpts = { gpu: true, pcmI: false, ...(debugOpts || {}) };
     this.captureMethod = ['yuv', 'bitmap', 'draw'].includes(captureMethod) ? captureMethod : null;
     if (this.captureMethod) this.capMethod = `${this.captureMethod}, forced`;
     this.workerSrc = workerSrc;
@@ -122,7 +124,7 @@ export class Recorder {
     const r = Promise.all([ready(this.enc), ready(this.dec), ready(this.cap)]);
     // The capture worker sends the pictures straight to the encoder worker (R-14).
     const ch = new MessageChannel();
-    this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2 }, [ch.port2]);
+    this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2, pcmI: this.debugOpts.pcmI }, [ch.port2]);
     this.dec.postMessage({ cmd: 'init', role: 'dec', w, h });
     // The way: forced (debug), else from the probe before the recording, else measured on the first frames.
     const preset = this.captureMethod || (this.capPreset && this.capPreset.method);
@@ -578,7 +580,7 @@ export class Recorder {
     const preview = this.decInFlight === 0 && live;
     if (!preview && live) this.viewSkips++;
     this.decInFlight++;
-    this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview, gpu: true }); // D31: the live view by the GPU
+    this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview, gpu: this.debugOpts.gpu }); // D31: the live view by the GPU
     this.checkIdle();
   }
 
