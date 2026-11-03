@@ -5674,6 +5674,12 @@ function onState(st) {
     pillTimer = 0;
   }
   if (rec && !rec.drops) el.body.removeAttribute('data-drops');
+  // A video with no frames (new video, revert to the start): no picture of the last video stays in the
+  // view. Until the first decoded frame of the new clip, the live source shows.
+  if (rec && !rec.hasFrames && (st === ST.IDLE || st === ST.RECORDING)) {
+    const c = el.mosh;
+    c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  }
   if (rec && st === ST.IDLE && !rec.hasFrames && el.thumbImg.src) {
     URL.revokeObjectURL(el.thumbImg.src);
     el.thumbImg.removeAttribute('src');
