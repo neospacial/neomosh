@@ -147,6 +147,12 @@ body[data-lock="1"] #lockBadge{display:block}
   font-size:12px;font-weight:700;color:var(--text);font-variant-numeric:tabular-nums}
 #lensBar button.active{color:var(--accent);background:rgba(0,0,0,.55);transform:scale(1.1)}
 html[data-theme="contrast"] #lensBar button{box-shadow:inset 0 0 0 1.5px #fff}
+/* D29: the zoom level (pinch); above the lens chips when they show. Touch: back to 1×. */
+#zoomChip{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);z-index:4;height:30px;padding:0 12px;
+  border-radius:15px;background:rgba(0,0,0,.55);color:var(--accent);font-size:13px;font-weight:700;font-variant-numeric:tabular-nums}
+#zoomChip[hidden]{display:none}
+#lensBar:not([hidden]) ~ #zoomChip{bottom:60px}
+html[data-theme="contrast"] #zoomChip{box-shadow:inset 0 0 0 1.5px #fff}
 #toast{
   position:absolute;left:50%;bottom:18px;transform:translate(-50%,8px);
   background:rgba(0,0,0,.62);border-radius:16px;padding:7px 14px;

@@ -20,7 +20,7 @@ const el = {
   thumbBtn: $('thumbBtn'), thumbImg: $('thumbImg'), slider: $('opacity'), pct: $('pct'),
   orientBtn: $('orientBtn'), ratios: [...document.querySelectorAll('.ratio')],
   focusBox: $('focusBox'), expoSun: $('expoSun'),
-  lensBar: $('lensBar'),
+  lensBar: $('lensBar'), zoomChip: $('zoomChip'),
   gearBtn: $('gearBtn'), exportBtn: $('exportBtn'), dropBadge: $('dropBadge'), dropN: $('dropN'),
   gate: $('gate'), gateTitle: $('gateTitle'), gateText: $('gateText'), gateBtn: $('gateBtn'), gateNew: $('gateNew'),
   player: $('player'), playBtn: $('playBtn'), scrub: $('scrub'), playTime: $('playTime'), cards: $('cards'),
@@ -272,6 +272,9 @@ function applyStream(stream, facing) {
 function readCapabilities() {
   const t = videoTrack();
   S.expoCap = null;
+  S.zoomCap = null;
+  S.zoom = 1;
+  showZoom(false);
   if (!t || !t.getCapabilities) return;
   let caps;
   try {
@@ -280,7 +283,63 @@ function readCapabilities() {
     return;
   }
   if (caps.exposureCompensation) S.expoCap = caps.exposureCompensation;
+  // D29: pinch zoom when the camera has a zoom range (for example one rear camera with all the lenses).
+  if (caps.zoom && caps.zoom.max > caps.zoom.min) {
+    S.zoomCap = caps.zoom;
+    const st = t.getSettings ? t.getSettings() : {};
+    S.zoomBase = st.zoom || Math.max(caps.zoom.min, Math.min(caps.zoom.max, 1)); // the zoom at the start: "1×"
+    S.zoom = S.zoomBase;
+  }
 }
+
+/* D29: zoom. The pinch scale times the zoom at the start of the pinch, within the camera range. At
+   most one applyConstraints at a time (the next value waits for it). The chip shows the level while
+   it is not 1×; touch it to go back. */
+let zoomBusy = false, zoomNext = null, zoomTimer = 0;
+
+function setZoom(z) {
+  const c = S.zoomCap;
+  if (!c) return;
+  const step = c.step || 0.1;
+  z = Math.max(c.min, Math.min(c.max, Math.round(z / step) * step));
+  if (Math.abs(z - S.zoom) < step / 2) return;
+  S.zoom = z;
+  showZoom(true);
+  zoomNext = z;
+  if (!zoomBusy) applyZoom();
+}
+
+function applyZoom() {
+  const t = videoTrack();
+  if (zoomNext === null || !t) return;
+  const z = zoomNext;
+  zoomNext = null;
+  zoomBusy = true;
+  t.applyConstraints({ advanced: [{ zoom: z }] }).catch(() => {}).finally(() => {
+    zoomBusy = false;
+    applyZoom();
+  });
+}
+
+// pinching: show the level now; else only when it is not 1×.
+function showZoom(pinching) {
+  const off = !S.zoomCap || S.source !== 'camera';
+  const level = S.zoomCap ? S.zoom / (S.zoomBase || 1) : 1;
+  el.zoomChip.textContent = `${level < 9.95 ? level.toFixed(1) : level.toFixed(0)}×`;
+  clearTimeout(zoomTimer);
+  zoomTimer = 0;
+  if (off) {
+    el.zoomChip.hidden = true;
+    return;
+  }
+  const away = Math.abs(level - 1) > 0.04;
+  el.zoomChip.hidden = !(pinching || away);
+  if (pinching && !away) zoomTimer = setTimeout(() => (el.zoomChip.hidden = true), 1200);
+}
+
+el.zoomChip.addEventListener('click', () => {
+  if (S.zoomCap) setZoom(S.zoomBase);
+});
 
 function countCameras() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
@@ -423,14 +482,38 @@ function nudgeExposure(dy) {
 
 (() => {
   let start = null, moved = false, longFired = false, longId = 0, lastY = 0;
+  const pts = new Map(); // D29: the fingers on the view
+  let pinch = null; // { d0, z0 }
+  const dist = () => {
+    const [a, b] = [...pts.values()];
+    return Math.hypot(a.x - b.x, a.y - b.y) || 1;
+  };
+  const lift = (e) => {
+    pts.delete(e.pointerId);
+    if (pinch && pts.size < 2) {
+      pinch = null;
+      showZoom(false);
+    }
+  };
 
   el.frame.addEventListener('pointerdown', (e) => {
     if (!S.hasVideo || S.source !== 'camera') return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    try {
+      el.frame.setPointerCapture(e.pointerId);
+    } catch { /* not an active pointer */ }
+    // Two fingers: a pinch, not a focus tap or a lock.
+    if (pts.size === 2 && S.zoomCap) {
+      clearTimeout(longId);
+      start = null;
+      pinch = { d0: dist(), z0: S.zoom };
+      return;
+    }
+    if (pts.size > 1) return;
     start = { x: e.clientX, y: e.clientY };
     moved = false;
     longFired = false;
     lastY = e.clientY;
-    if (el.frame.setPointerCapture) el.frame.setPointerCapture(e.pointerId);
     longId = setTimeout(() => {
       if (moved || !start) return;
       longFired = true;
@@ -441,6 +524,11 @@ function nudgeExposure(dy) {
   });
 
   el.frame.addEventListener('pointermove', (e) => {
+    if (pts.has(e.pointerId)) pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pts.size === 2) {
+      setZoom(pinch.z0 * (dist() / pinch.d0));
+      return;
+    }
     if (!start) return;
     const dx = e.clientX - start.x, dy = e.clientY - start.y;
     if (!moved && Math.abs(dx) + Math.abs(dy) > 10) {
@@ -451,7 +539,8 @@ function nudgeExposure(dy) {
     lastY = e.clientY;
   });
 
-  el.frame.addEventListener('pointerup', () => {
+  el.frame.addEventListener('pointerup', (e) => {
+    lift(e);
     if (!start) return;
     clearTimeout(longId);
     const s = start;
@@ -460,7 +549,8 @@ function nudgeExposure(dy) {
     focusHere(s.x, s.y, false);
   });
 
-  el.frame.addEventListener('pointercancel', () => {
+  el.frame.addEventListener('pointercancel', (e) => {
+    lift(e);
     clearTimeout(longId);
     start = null;
   });
@@ -626,6 +716,7 @@ function setSource(kind) {
     if (p && p.catch) p.catch(() => {});
   } else el.preview.pause();
   if (rec) rec.setSource(activeVideo(), kind, S.file);
+  showZoom(false); // D29: zoom is for the camera only
   updateFileBar();
   refreshUI();
   layoutFrame();

@@ -184,4 +184,76 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'pinch zoom (D29): two fingers zoom within the camera range; the chip shows the level and goes back to 1×',
+    async fn() {
+      if (!chromium) return skip();
+      // The fake camera gets a zoom range 1..8 (as one Android rear camera with all the lenses).
+      const init = () => {
+        window.__zoom = [];
+        const P = MediaStreamTrack.prototype;
+        const caps = P.getCapabilities, sets = P.getSettings, apply = P.applyConstraints;
+        let z = 1;
+        P.getCapabilities = function () { return { ...(caps ? caps.call(this) : {}), zoom: { min: 1, max: 8, step: 0.1 } }; };
+        P.getSettings = function () { return { ...sets.call(this), zoom: z }; };
+        P.applyConstraints = function (c) {
+          const a = c && c.advanced && c.advanced[0];
+          if (a && a.zoom !== undefined) {
+            z = a.zoom;
+            window.__zoom.push(a.zoom);
+            return Promise.resolve();
+          }
+          return apply.call(this, c);
+        };
+      };
+      const h = await openApp('zoom', { init });
+      try {
+        const { page } = h;
+        await h.start();
+        assert(await page.$eval('#zoomChip', (e) => e.hidden), 'no chip at 1×');
+        // A pinch: two fingers 100 px apart, then 250 px apart: 2.5×.
+        const pinch = (from, to) => page.evaluate(([from, to]) => {
+          const f = document.getElementById('frame');
+          const r = f.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const ev = (type, id, x) => f.dispatchEvent(new PointerEvent(type, { pointerId: id, clientX: x, clientY: cy, bubbles: true, isPrimary: id === 1 }));
+          ev('pointerdown', 1, cx - from / 2);
+          ev('pointerdown', 2, cx + from / 2);
+          for (let k = 1; k <= 5; k++) ev('pointermove', 2, cx - from / 2 + from + ((to - from) * k) / 5);
+          ev('pointerup', 2, cx - from / 2 + to);
+          ev('pointerup', 1, cx - from / 2);
+        }, [from, to]);
+        await pinch(100, 250);
+        await page.waitForFunction(() => window.__zoom.length && Math.abs(window.__zoom[window.__zoom.length - 1] - 2.5) < 0.06);
+        assert(await page.$eval('#zoomChip', (e) => !e.hidden && e.textContent === '2.5×'), `the chip shows 2.5×: ${await page.$eval('#zoomChip', (e) => e.textContent)}`);
+        assert(await page.$eval('#focusBox', (b) => b.style.opacity !== '1'), 'a pinch is not a focus tap');
+        // One finger is still a focus tap.
+        await page.evaluate(() => {
+          const f = document.getElementById('frame');
+          const r = f.getBoundingClientRect();
+          const o = { pointerId: 7, clientX: r.left + 60, clientY: r.top + 60, bubbles: true, isPrimary: true };
+          f.dispatchEvent(new PointerEvent('pointerdown', o));
+          f.dispatchEvent(new PointerEvent('pointerup', o));
+        });
+        assert(await page.$eval('#focusBox', (b) => b.style.opacity === '1'), 'one finger: a focus tap');
+        // Far beyond the range: 8× at most.
+        await pinch(50, 400);
+        await page.waitForFunction(() => window.__zoom[window.__zoom.length - 1] === 8);
+        // Zoom works while recording, too.
+        await page.click('#shutter');
+        await h.waitState('recording');
+        await pinch(300, 100);
+        await page.waitForFunction(() => Math.abs(window.__zoom[window.__zoom.length - 1] - 2.7) < 0.06);
+        await page.click('#shutter');
+        await h.waitState('paused');
+        // The chip: back to 1×, and it hides.
+        await page.click('#zoomChip');
+        await page.waitForFunction(() => window.__zoom[window.__zoom.length - 1] === 1);
+        await page.waitForFunction(() => document.getElementById('zoomChip').hidden, null, { timeout: 3000 });
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
 ];
