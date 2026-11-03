@@ -1,21 +1,46 @@
 /* Based on neocamera v1.5.0. */
 :root{
-  --ios-yellow:#ffd60a;
-  --ios-red:#ff3b30;
-  --ios-amber:#ff9f0a;
+  /* D26: the Default theme. Green #99ff00 for the accent and for the record colour. */
+  --accent:#99ff00;
+  --rec:#99ff00;
+  --warn:#ff9f0a;
+  --on-accent:#000;
+  --text:#fff;
+  --dim:#8e8e93;
+  --chip:rgba(255,255,255,.12);
+  --line:rgba(255,255,255,.08);
   --chrome:#000;
   --glass:rgba(255,255,255,.18);
   --sheet:#1c1c1e;
   --row:#2c2c2e;
 }
+/* OS: the look of neocamera (iOS colours). */
+html[data-theme="os"]{--accent:#ffd60a;--rec:#ff3b30}
+/* Contrast: white for the accent and the record colour, full white text, outlines on the controls. */
+html[data-theme="contrast"]{
+  --accent:#fff;--rec:#fff;--warn:#ffb340;--dim:#fff;--chip:#000;--line:rgba(255,255,255,.6);
+  --glass:rgba(0,0,0,.75);--sheet:#000;--row:#000;
+}
+html[data-theme="contrast"] .seg button,html[data-theme="contrast"] .ratio,html[data-theme="contrast"] #orientBtn,
+html[data-theme="contrast"] .actions button,html[data-theme="contrast"] #cutList button,html[data-theme="contrast"] #flip,
+html[data-theme="contrast"] #bloomBtn,html[data-theme="contrast"] .badge{box-shadow:inset 0 0 0 1.5px #fff}
+html[data-theme="contrast"] .sheet{box-shadow:0 0 0 1.5px #fff}
+html[data-theme="contrast"] .mode{color:#fff}
+html[data-theme="contrast"] .mode.active{text-decoration:underline;text-underline-offset:5px;text-decoration-thickness:2px}
+html[data-theme="contrast"] .actions button.danger,html[data-theme="contrast"] #confirm button.danger{text-decoration:underline}
+/* Night: soft, warm accents and warm text. */
+html[data-theme="night"]{
+  --accent:#e8b27d;--rec:#d9785a;--warn:#d9a05b;--text:#f2e6d8;--dim:#a8998a;
+  --chip:rgba(255,226,196,.10);--line:rgba(255,226,196,.08);--glass:rgba(255,226,196,.14);--sheet:#1c1814;--row:#2a241f;
+}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 html,body{height:100%;margin:0;background:#000;overflow:hidden;overflow:clip;overscroll-behavior:none}
 body{
   font:500 14px/1.2 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
-  color:#fff;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
+  color:var(--text);user-select:none;-webkit-user-select:none;-webkit-touch-callout:none;
 }
 button{font:inherit;color:inherit;border:0;background:none;padding:0;cursor:pointer;-webkit-appearance:none;appearance:none;outline:none}
-button:focus-visible{outline:2px solid var(--ios-yellow);outline-offset:3px;border-radius:6px}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:6px}
 button[disabled]{cursor:default}
 
 /* overflow:clip: the closed sheets below the screen must not make #app scroll (focus, scrollIntoView). */
@@ -28,8 +53,8 @@ button[disabled]{cursor:default}
 #topBar{flex:0 0 auto;height:46px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 12px}
 .topBtn{height:32px;display:flex;align-items:center}
 #gearBtn{justify-self:start;width:32px;justify-content:center}
-#gearBtn svg{width:24px;height:24px;fill:#fff}
-#exportBtn{justify-self:end;font-size:15px;font-weight:600;color:var(--ios-yellow);padding:0 4px}
+#gearBtn svg{width:24px;height:24px;fill:var(--text)}
+#exportBtn{justify-self:end;font-size:15px;font-weight:600;color:var(--accent);padding:0 4px}
 #exportBtn[disabled]{color:rgba(255,255,255,.28)}
 #topCenter{display:flex;align-items:center;gap:8px}
 #recPill{
@@ -37,7 +62,7 @@ button[disabled]{cursor:default}
   background:rgba(0,0,0,.55);border-radius:16px;padding:5px 12px;
   font-size:15px;font-variant-numeric:tabular-nums;white-space:nowrap;
 }
-#recDot{width:9px;height:9px;border-radius:50%;background:var(--ios-red)}
+#recDot{width:9px;height:9px;border-radius:50%;background:var(--rec)}
 #clipLbl{color:#aeaeb2;font-size:13px}
 body[data-state="recording"] #recPill,body[data-state="pausing"] #recPill,body[data-state="paused"] #recPill,body[data-state="exporting"] #recPill{display:flex}
 body[data-state="recording"] #recDot{animation:blink 1s steps(1,end) infinite}
@@ -46,7 +71,7 @@ body[data-state="paused"] #recDot,body[data-state="pausing"] #recDot,body[data-s
 
 .badge{display:none;align-items:center;gap:3px;height:24px;padding:0 6px;border-radius:12px;background:rgba(255,255,255,.08);font-size:12px;font-variant-numeric:tabular-nums}
 .badge svg{width:15px;height:15px;fill:currentColor}
-#dropBadge{color:var(--ios-amber)}
+#dropBadge{color:var(--warn)}
 body[data-drops="1"] #dropBadge{display:flex}
 body[data-pulse="1"] #dropBadge{animation:pulse .6s ease-out}
 @keyframes pulse{0%{transform:scale(1.35);background:rgba(255,159,10,.45)}100%{transform:scale(1)}}
@@ -71,7 +96,7 @@ input[type=range]::-moz-range-thumb{
   width:22px;height:22px;border:0;border-radius:50%;background:#fff;
   box-shadow:0 1px 4px rgba(0,0,0,.6);
 }
-input[type=range]:focus-visible{outline:2px solid var(--ios-yellow);outline-offset:6px}
+input[type=range]:focus-visible{outline:2px solid var(--accent);outline-offset:6px}
 
 /* ---------- viewfinder ---------- */
 #stage{flex:1 1 auto;position:relative;overflow:hidden;background:#000;display:flex;align-items:center;justify-content:center}
@@ -96,7 +121,7 @@ body[data-state="paused"] #overlay{display:block;will-change:opacity;transform:t
 /* focus and exposure */
 #focusBox{
   position:absolute;left:0;top:0;width:76px;height:76px;margin:-38px 0 0 -38px;
-  border:1px solid var(--ios-yellow);border-radius:4px;
+  border:1px solid var(--accent);border-radius:4px;
   opacity:0;pointer-events:none;
   box-shadow:0 0 3px rgba(0,0,0,.45);
   transition:opacity .35s ease;
@@ -105,10 +130,10 @@ body[data-state="paused"] #overlay{display:block;will-change:opacity;transform:t
 @keyframes pop{0%{opacity:0;transform:scale(1.45)}25%{opacity:1}100%{opacity:1;transform:scale(1)}}
 #expo{position:absolute;left:100%;top:50%;margin-left:7px;transform:translateY(-50%);display:none}
 #focusBox.expo #expo{display:block}
-#expoSun{width:20px;height:20px;fill:var(--ios-yellow);display:block;transition:transform .05s linear}
+#expoSun{width:20px;height:20px;fill:var(--accent);display:block;transition:transform .05s linear}
 #lockBadge{
   position:absolute;left:50%;top:14px;transform:translateX(-50%);
-  background:var(--ios-yellow);color:#000;font-size:11px;font-weight:700;letter-spacing:.06em;
+  background:var(--accent);color:var(--on-accent);font-size:11px;font-weight:700;letter-spacing:.06em;
   padding:3px 8px;border-radius:3px;display:none;
 }
 body[data-lock="1"] #lockBadge{display:block}
@@ -128,15 +153,15 @@ body[data-lock="1"] #lockBadge{display:block}
   padding:6px 14px 10px;background:var(--chrome);
 }
 #orientBtn{
-  font-size:12px;font-weight:600;color:var(--ios-yellow);
-  padding:6px 13px;border-radius:13px;background:rgba(255,255,255,.12);
+  font-size:12px;font-weight:600;color:var(--accent);
+  padding:6px 13px;border-radius:13px;background:var(--chip);
 }
 #ratioBar .sep{width:1px;height:20px;background:rgba(255,255,255,.2);align-self:center}
 .ratio{
   font-size:12px;font-weight:600;letter-spacing:.03em;color:#fff;
-  padding:6px 13px;border-radius:13px;background:rgba(255,255,255,.12);
+  padding:6px 13px;border-radius:13px;background:var(--chip);
 }
-.ratio.active{background:var(--ios-yellow);color:#000}
+.ratio.active{background:var(--accent);color:var(--on-accent)}
 .ratio[disabled],#orientBtn[disabled]{opacity:.35}
 
 #modes{display:flex;align-items:center;justify-content:center;gap:30px;height:38px}
@@ -144,7 +169,7 @@ body[data-lock="1"] #lockBadge{display:block}
   font-size:12px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
   color:rgba(255,255,255,.82);padding:8px 2px;transition:color .15s ease;
 }
-.mode.active{color:var(--ios-yellow)}
+.mode.active{color:var(--accent)}
 .mode[disabled]{color:rgba(255,255,255,.28)}
 
 #controls{height:112px;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 24px}
@@ -157,15 +182,15 @@ body[data-lock="1"] #lockBadge{display:block}
 
 #shutter{
   width:74px;height:74px;border-radius:50%;justify-self:center;
-  box-shadow:inset 0 0 0 3px #fff;display:grid;place-items:center;transition:transform .1s ease;
+  box-shadow:inset 0 0 0 3px var(--text);display:grid;place-items:center;transition:transform .1s ease;
 }
 #shutter:active{transform:scale(.94)}
 #shutter[disabled]{opacity:.4}
-#core{width:60px;height:60px;border-radius:50%;background:var(--ios-red);transition:width .18s ease,height .18s ease,border-radius .18s ease}
+#core{width:60px;height:60px;border-radius:50%;background:var(--rec);transition:width .18s ease,height .18s ease,border-radius .18s ease}
 body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;height:30px;border-radius:8px}
 
 #flip{width:50.6px;height:50.6px;border-radius:50%;justify-self:end;background:var(--glass);display:grid;place-items:center}
-#flip svg{width:26.4px;height:26.4px;fill:#fff}
+#flip svg{width:26.4px;height:26.4px;fill:var(--text)}
 #flip[disabled]{opacity:.35}
 
 /* Bloom (D24): hold while paused. Next to the shutter, in the column of the camera button. */
@@ -175,11 +200,11 @@ body[data-state="recording"] #core,body[data-state="pausing"] #core{width:30px;h
   touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;
   transition:transform .1s ease,background .1s ease;
 }
-#bloomBtn svg{width:24px;height:24px;fill:#fff}
-#bloomBtn span{font-size:8.5px;font-weight:700;letter-spacing:.08em;color:#fff}
-#bloomBtn.on{background:var(--ios-yellow);transform:scale(1.08)}
-#bloomBtn.on svg{fill:#000}
-#bloomBtn.on span{color:#000}
+#bloomBtn svg{width:24px;height:24px;fill:var(--text)}
+#bloomBtn span{font-size:8.5px;font-weight:700;letter-spacing:.08em;color:var(--text)}
+#bloomBtn.on{background:var(--accent);transform:scale(1.08)}
+#bloomBtn.on svg{fill:var(--on-accent)}
+#bloomBtn.on span{color:var(--on-accent)}
 body[data-state="paused"] #bloomBtn,body[data-state="blooming"] #bloomBtn{display:flex}
 #bloomBtn[disabled]{opacity:.35}
 body[data-state="blooming"] #mosh{display:block}
@@ -195,11 +220,11 @@ body[data-state="blooming"] #mosh{display:block}
 #gate h1{margin:0;font-size:20px;font-weight:600}
 #gate p{margin:0;max-width:34ch;font-size:14px;font-weight:400;line-height:1.45;color:#aeaeb2}
 #gate .ver{font-size:12px;color:#636366}
-#gateBtn{margin-top:6px;background:var(--ios-yellow);color:#000;font-weight:600;font-size:16px;padding:12px 26px;border-radius:24px}
+#gateBtn{margin-top:6px;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:16px;padding:12px 26px;border-radius:24px}
 #gateBtn[disabled],#gateNew[disabled]{opacity:.5}
-#gateNew{color:var(--ios-yellow);font-weight:600;font-size:15px;padding:8px 16px}
+#gateNew{color:var(--accent);font-weight:600;font-size:15px;padding:8px 16px}
 #gateNew[hidden],#gateFile[hidden]{display:none}
-#gateFile{color:var(--ios-yellow);font-weight:600;font-size:15px;padding:8px 16px}
+#gateFile{color:var(--accent);font-weight:600;font-size:15px;padding:8px 16px}
 
 /* ---------- sheets ---------- */
 #sheetBack{position:absolute;inset:0;z-index:20;background:rgba(0,0,0,.45);display:none}
@@ -214,31 +239,39 @@ body[data-sheet="settings"] #settingsSheet,body[data-sheet="export"] #exportShee
 #reviewSheet{max-height:100%;height:100%;border-radius:0;padding-top:env(safe-area-inset-top)}
 .sheet header{display:flex;align-items:center;justify-content:space-between;height:52px;position:sticky;top:0;background:var(--sheet)}
 .sheet h2{margin:0;font-size:17px;font-weight:600}
-.sheet .done{color:var(--ios-yellow);font-weight:600;font-size:15px}
+.sheet .done{color:var(--accent);font-weight:600;font-size:15px}
 .group{background:var(--row);border-radius:10px;padding:4px 12px;margin-bottom:14px}
-.row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;border-bottom:1px solid rgba(255,255,255,.08)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:46px;border-bottom:1px solid var(--line)}
 .group .row:last-child{border-bottom:0}
 .row .val{color:#aeaeb2}
 .seg{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}
-.seg button{font-size:13px;font-weight:600;padding:6px 11px;border-radius:13px;background:rgba(255,255,255,.12)}
-.seg button.active{background:var(--ios-yellow);color:#000}
+.seg button{font-size:13px;font-weight:600;padding:6px 11px;border-radius:13px;background:var(--chip)}
+.seg button.active{background:var(--accent);color:var(--on-accent)}
 .seg button[disabled]{opacity:.35}
-.hint{margin:6px 0 8px;font-size:12px;font-weight:400;line-height:1.4;color:#8e8e93}
-.hint.warn{color:var(--ios-amber)}
+.hint{margin:6px 0 8px;font-size:12px;font-weight:400;line-height:1.4;color:var(--dim)}
+.hint.warn{color:var(--warn)}
 .hint[hidden],.group[hidden]{display:none}
 .slider{display:flex;align-items:center;gap:10px;flex:1 1 auto;max-width:220px}
 .slider span{min-width:28px;text-align:right;font-size:13px;font-variant-numeric:tabular-nums}
 input[type=range]:disabled{opacity:.35}
-.info{font-size:12px;font-weight:400;color:#8e8e93;line-height:1.6;padding:8px 12px}
+.info{font-size:12px;font-weight:400;color:var(--dim);line-height:1.6;padding:8px 12px}
+/* D26: the info section opens and closes. */
+.info summary{list-style:none;display:flex;align-items:center;gap:10px;min-height:30px;font-size:14px;font-weight:500;color:var(--text);cursor:pointer}
+.info summary::-webkit-details-marker{display:none}
+.info summary::before{content:'';width:7px;height:7px;border-right:2px solid var(--dim);border-bottom:2px solid var(--dim);transform:rotate(-45deg);transition:transform .15s ease;margin:0 2px}
+.info[open] summary::before{transform:rotate(45deg)}
+#infoWarn{margin-left:auto;font-size:11px;font-weight:600;color:var(--warn)}
+.info p{margin:4px 0}
+#info{font-size:11px;opacity:.8}
 #cutList{display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 10px}
-#cutList button{font-size:12px;font-weight:600;padding:6px 10px;border-radius:13px;background:rgba(255,255,255,.12)}
+#cutList button{font-size:12px;font-weight:600;padding:6px 10px;border-radius:13px;background:var(--chip)}
 #cutList button.clean{background:#fff;color:#000}
 #cutList:empty{display:none}
 #progress{height:4px;border-radius:2px;background:rgba(255,255,255,.15);overflow:hidden;margin:12px 0 4px}
-#progress i{display:block;height:100%;width:0;background:var(--ios-yellow)}
+#progress i{display:block;height:100%;width:0;background:var(--accent)}
 .actions{display:flex;gap:8px;flex-wrap:wrap;padding:6px 0 10px}
-.actions button{flex:1 1 40%;padding:11px 14px;border-radius:12px;background:rgba(255,255,255,.12);font-weight:600;font-size:15px}
-.actions button.primary{background:var(--ios-yellow);color:#000}
+.actions button{flex:1 1 40%;padding:11px 14px;border-radius:12px;background:var(--chip);font-weight:600;font-size:15px}
+.actions button.primary{background:var(--accent);color:var(--on-accent)}
 .actions button[hidden]{display:none}
 
 /* ---------- review (plan §11.4) ---------- */
@@ -246,7 +279,7 @@ input[type=range]:disabled{opacity:.35}
 #player{display:block;max-width:100%;max-height:44vh;background:#000}
 #playerBar{display:flex;align-items:center;gap:12px;padding:10px 4px}
 #playBtn{width:36px;height:36px;display:grid;place-items:center}
-#playBtn svg{width:24px;height:24px;fill:#fff}
+#playBtn svg{width:24px;height:24px;fill:var(--text)}
 #playBtn .ic-pause{display:none}
 body[data-playing="1"] #playBtn .ic-play{display:none}
 body[data-playing="1"] #playBtn .ic-pause{display:block}
@@ -256,9 +289,9 @@ body[data-playing="1"] #playBtn .ic-pause{display:block}
 .card .pic{width:96px;height:72px;border-radius:9px 9px 0 0;background:#111 center/cover no-repeat;display:grid;place-items:center;color:#636366;font-size:12px}
 .card b{display:block;font-size:12px;padding:6px 7px 1px}
 .card small{display:block;font-size:11px;font-weight:400;color:#8e8e93;padding:0 7px}
-.card small.warn{color:var(--ios-amber)}
-.card.now{box-shadow:inset 0 0 0 2px var(--ios-yellow)}
-.actions button.danger,#confirm button.danger{color:var(--ios-red)}
+.card small.warn{color:var(--warn)}
+.card.now{box-shadow:inset 0 0 0 2px var(--accent)}
+.actions button.danger,#confirm button.danger{color:var(--rec)}
 #confirm{position:absolute;inset:0;z-index:30;background:rgba(0,0,0,.55);display:none;align-items:flex-end;justify-content:center;padding:16px calc(16px + env(safe-area-inset-bottom))}
 body[data-confirm="1"] #confirm{display:flex}
 #confirm .box{width:100%;max-width:420px;background:var(--sheet);border-radius:14px;padding:18px 16px 8px}

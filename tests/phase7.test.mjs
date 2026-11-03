@@ -215,4 +215,42 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'settings (D26): themes, the info section (closed, plain), the frame-rate hint only after a clip',
+    async fn() {
+      if (!chromium) return skip();
+      // A very slow saved speed: before a clip, it must not show a hint.
+      const init = () => localStorage.setItem('neomosh.speed2', JSON.stringify({ enc: 900, cap: 900 }));
+      const h = await openApp('themes', { init });
+      try {
+        const { page } = h;
+        await h.start();
+        const accent = () => page.$eval('.seg[data-key="theme"] button.active', (b) => getComputedStyle(b).backgroundColor);
+        const core = () => page.$eval('#core', (c) => getComputedStyle(c).backgroundColor);
+        await page.click('#gearBtn');
+        assert(await page.$eval('html', (e) => e.dataset.theme) === 'default', 'the default theme');
+        assert(await accent() === 'rgb(153, 255, 0)' && await core() === 'rgb(153, 255, 0)', 'Default: #99ff00 accent and record colour');
+        // The info section: closed, with the plain lines; the details only with #debug.
+        assert(await page.$eval('#infoBox', (d) => !d.open), 'the info section is closed by default');
+        assert(await page.$eval('#info', (e) => e.hidden), 'the details are hidden without #debug');
+        assert(await page.$eval('#fpsHint', (e) => e.hidden), 'no frame-rate hint before the first clip');
+        await page.click('#infoBox summary');
+        const plain = await page.$eval('#infoBox', (d) => d.innerText);
+        assert(/Dropped frames/.test(plain) && /Storage: \d+ MB used/.test(plain) && /(reads|scales|takes) the camera|reads the raw camera/.test(plain), `info: ${plain}`);
+        const want = { os: ['rgb(255, 214, 10)', 'rgb(255, 59, 48)'], contrast: ['rgb(255, 255, 255)', 'rgb(255, 255, 255)'], night: ['rgb(232, 178, 125)', 'rgb(217, 120, 90)'] };
+        for (const [t, [a, r]] of Object.entries(want)) {
+          await page.click(`.seg[data-key="theme"] button[data-v="${t}"]`);
+          assert(await accent() === a && await core() === r, `${t}: accent ${await accent()}, record ${await core()}`);
+        }
+        await page.click('#settingsSheet .done');
+        // The theme stays after a reload.
+        await page.reload();
+        await page.waitForSelector('#gate');
+        assert(await page.$eval('html', (e) => e.dataset.theme) === 'night', 'the theme is kept');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
 ];
