@@ -6,7 +6,7 @@ import { upscaleConfig, upscaleExport } from './upscale.js';
 import { selfTest, timelineCheck } from './selftest.js';
 import { sessionSize, fileStamp, formatTime } from './geometry.js';
 import { Store } from './store.js';
-import { Recorder, ST } from './recorder.js';
+import { Recorder, ST, prepareKernels } from './recorder.js';
 import { DEFAULT_SETTINGS, checkSettings } from '../codec/encoder.js';
 import { Player } from './player.js';
 
@@ -38,6 +38,9 @@ const el = {
 // Debug options in the address: #debug (the self-test), capture=yuv|bitmap|draw (the crop way of the
 // capture worker, D22). Example: #debug&capture=yuv
 const HASH = new URLSearchParams(location.hash.slice(1));
+
+// D30: compile the WebAssembly module now, once for all workers (it does not block the page).
+prepareKernels();
 
 // Display and session preferences. Kept in localStorage (a per-viewer convenience only).
 const PREF_KEY = 'neomosh.prefs';

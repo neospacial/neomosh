@@ -50,6 +50,10 @@ export const tests = [
         // The last exported picture equals the overlay (the live decoder output).
         assert(overlay.w === s.w && overlay.h === s.h, 'overlay size');
         assert(maxDiff(toRgba(m.frame(m.count - 1), s.w, s.h), overlay.data) <= 2, 'the overlay differs from the exported last frame');
+        // D30: the workers use the WebAssembly module that the page compiled.
+        await page.click('#gearBtn');
+        assert(/Codec: WebAssembly SIMD/.test(await page.$eval('#info', (e) => e.textContent)), 'the workers must use WebAssembly');
+        await page.click('#settingsSheet .done');
         assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
       } finally {
         await h.close();

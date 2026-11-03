@@ -49,11 +49,12 @@ export function bundle(files) {
 }
 
 const safeScript = (s) => s.replace(/<\/script/gi, '<\\/script');
-// "codec": all CODEC_MODULES. "codec-main": the same without the WebAssembly module (main page).
+// "codec": all CODEC_MODULES. "codec-nobytes": the same without the WebAssembly bytes (the app
+// workers: the page compiles the module once and gives it to them, D30).
 const moduleList = (list) => list.split(',').flatMap((s) => {
   const t = s.trim();
   if (t === 'codec') return CODEC_MODULES;
-  if (t === 'codec-main') return CODEC_MODULES.map((m) => (m === 'codec/wasm-bytes.js' ? 'codec/wasm-none.js' : m));
+  if (t === 'codec-nobytes') return CODEC_MODULES.map((m) => (m === 'codec/wasm-bytes.js' ? 'codec/wasm-none.js' : m));
   return [t];
 });
 

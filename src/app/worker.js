@@ -5,6 +5,7 @@
 
 import { Encoder } from '../codec/encoder.js';
 import { Decoder } from '../codec/decoder.js';
+import { setKernelsModule } from '../codec/wasm.js';
 import { coverCrop } from './geometry.js';
 import { FrameGate, SourceGaps } from './capture.js';
 import { CamYuv } from './camyuv.js';
@@ -290,9 +291,16 @@ async function captureClip(m, run) {
           break;
         }
       }
-      // Probe (before the recording): only measure the ways, then stop. No gate, no encoder.
-      if (cap.probe) {
-        if (cap.method || ++cap.probeFrames > 80) break;
+      // Probe (before the recording): only measure the ways, then stop. No gate, no encoder. At the end
+      // the page stops the track; the frames still in the stream are closed above until it ends (a
+      // cancel would drop them without close()).
+      if (cap.probe && (cap.method || ++cap.probeFrames > 80)) {
+        cap.run++;
+        frame.close();
+        if (!cap.method) self.postMessage({ cmd: 'probeEnd' });
+        if (cap.track) cap.track.stop(); // Safari: the track is in this worker
+        armQuietCancel(reader);
+        continue;
       }
       const t = frame.timestamp / 1000;
       // A gap in the source times: when this worker waited for the frame, the camera did not give the
@@ -548,8 +556,22 @@ async function upFrame(m) {
   self.postMessage({ cmd: 'upAck' });
 }
 
+// D30: the messages wait for the compiled module from the page (the first message, 'kernels').
+let kernelsSet = false;
+const waiting = [];
+
 self.onmessage = (e) => {
-  const m = e.data;
+  if (e.data.cmd === 'kernels') {
+    setKernelsModule(e.data.module);
+    kernelsSet = true;
+    for (const m of waiting.splice(0)) run(m);
+    return;
+  }
+  if (!kernelsSet) waiting.push(e.data);
+  else run(e.data);
+};
+
+function run(m) {
   const fail = (err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: m.cmd });
   try {
     const r = handlers[m.cmd](m);
@@ -557,4 +579,4 @@ self.onmessage = (e) => {
   } catch (err) {
     fail(err);
   }
-};
+}

@@ -4,6 +4,10 @@ import { DEFAULT_SETTINGS, checkSettings } from '../codec/encoder.js';
 import { streamParams } from '../codec/headers.js';
 import { coverCrop } from './geometry.js';
 import { FrameGate } from './capture.js';
+import { compileKernels } from '../codec/wasm.js';
+
+// D30: the WebAssembly module, compiled once by the page for all workers.
+let kernels = null;
 
 export const ST = {
   IDLE: 'idle',
@@ -17,11 +21,21 @@ export const ST = {
 
 const MAX_IN_FLIGHT = 6; // R-18 (D19): about 200 ms of buffer at 30 fps for short CPU load peaks
 
+// A worker of the app. Its first message is the compiled module (or null); the worker keeps the other
+// messages until it has the module (D30).
 export function makeWorker(src) {
   const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
   const wk = new Worker(url);
   URL.revokeObjectURL(url);
+  if (!kernels) kernels = compileKernels();
+  kernels.then((module) => wk.postMessage({ cmd: 'kernels', module }), () => wk.postMessage({ cmd: 'kernels', module: null }));
   return wk;
+}
+
+// Start the compile early (at page load), so that the first worker does not wait for it.
+export function prepareKernels() {
+  if (!kernels) kernels = compileKernels();
+  return kernels;
 }
 
 // The info text of a capture way result: the way, the times of each way, the YUV colour check.
@@ -206,15 +220,21 @@ export class Recorder {
         }
       } else if (m.cmd === 'capMethod') {
         out = { method: m.method, text: methodText(m), ms: m.times[m.method] };
-      } else if (m.cmd === 'capStopped' || m.cmd === 'capMismatch' || m.cmd === 'error') done();
+        done();
+      } else if (m.cmd === 'capStopped') {
+        done();
+        stopped();
+      } else if (m.cmd === 'probeEnd' || m.cmd === 'capMismatch' || m.cmd === 'error') done();
     };
+    // The worker ends after its last frame is closed (capStopped), or after 3 s.
+    let stopped;
+    const end = new Promise((r) => (stopped = r));
     wk.postMessage({ cmd: 'init', role: 'cap', w, h, probe: true });
     const timer = setTimeout(done, 5000);
     await result;
     clearTimeout(timer);
-    clone.stop();
-    // Let the worker close the frames that are still in its queue, then end it.
-    setTimeout(() => wk.terminate(), 400);
+    clone.stop(); // the stream ends; the worker closes the frames still in it
+    Promise.race([end, new Promise((r) => setTimeout(r, 3000))]).then(() => wk.terminate());
     return out;
   }
 
