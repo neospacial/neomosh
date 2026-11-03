@@ -778,6 +778,29 @@ void scale_yuv(const u8 *sy, int sys, const u8 *su, const u8 *sv, int sus, int c
   pad_coded(V, cw, ch, cW, codedH >> 1);
 }
 
+/* D34: turn planar I420 planes (sw x sh, tight strides) by 90, 180, or 270 degrees clockwise, the way a
+   player shows a turned file (demux.js turnedCrop), into the coded planes, then pad them. */
+static void turn_plane(const u8 *s, int sw, int sh, int rot, u8 *d, int ds) {
+  if (rot == 90) {
+    for (int y = 0; y < sw; y++) for (int x = 0; x < sh; x++) d[y * ds + x] = s[(sh - 1 - x) * sw + y];
+  } else if (rot == 270) {
+    for (int y = 0; y < sw; y++) for (int x = 0; x < sh; x++) d[y * ds + x] = s[x * sw + (sw - 1 - y)];
+  } else {
+    for (int y = 0; y < sh; y++) for (int x = 0; x < sw; x++) d[y * ds + x] = s[(sh - 1 - y) * sw + (sw - 1 - x)];
+  }
+}
+
+EXPORT(turn_yuv)
+void turn_yuv(const u8 *sY, const u8 *sU, const u8 *sV, int sw, int sh, int rot, u8 *Y, u8 *U, u8 *V, int codedW, int codedH) {
+  const int w = rot == 180 ? sw : sh, h = rot == 180 ? sh : sw;
+  turn_plane(sY, sw, sh, rot, Y, codedW);
+  turn_plane(sU, sw >> 1, sh >> 1, rot, U, codedW >> 1);
+  turn_plane(sV, sw >> 1, sh >> 1, rot, V, codedW >> 1);
+  pad_coded(Y, w, h, codedW, codedH);
+  pad_coded(U, w >> 1, h >> 1, codedW >> 1, codedH >> 1);
+  pad_coded(V, w >> 1, h >> 1, codedW >> 1, codedH >> 1);
+}
+
 EXPORT(yuv420_to_rgba)
 void yuv420_to_rgba(const u8 *Y, const u8 *U, const u8 *V, int codedW, int w, int h, u8 *rgba) {
   const int cW = codedW >> 1;

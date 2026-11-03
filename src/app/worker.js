@@ -159,11 +159,13 @@ async function canvasPicture(frame, c, mirror, method) {
    busy, it waits: no frame is dropped. The frame times come from the file (media time), so the export
    has the speed of the file, at any decode speed. */
 let fileDemux = null; // { key, d } for the last file
+let fileYuv = { ok: undefined, tries: 0, text: '' }; // D34: the YUV way for this file (checked once)
 
 async function fileInfo(file) {
   const key = `${file.name}|${file.size}|${file.lastModified}`;
   if (fileDemux && fileDemux.key === key) return fileDemux.d;
   const d = await demuxMp4(file);
+  fileYuv = { ok: undefined, tries: 0, text: '' }; // a new file: check its colours again
   let ok = false;
   if (d && typeof VideoDecoder === 'function') {
     try {
@@ -253,15 +255,47 @@ async function fileClip(m, run) {
       const turned = d.rotation % 180 !== 0;
       const c = coverCrop(turned ? fh : fw, turned ? fw : fh, w, h);
       const t = turnedCrop(d.rotation, fw, fh, c, w, h);
-      ctx.setTransform(...t.m);
-      ctx.drawImage(frame, t.sx, t.sy, t.sw, t.sh, 0, 0, t.dw, t.dh);
+      const draw = () => {
+        ctx.setTransform(...t.m);
+        ctx.drawImage(frame, t.sx, t.sy, t.sw, t.sh, 0, 0, t.dw, t.dh);
+        return ctx.getImageData(0, 0, w, h).data;
+      };
+      // D34: the YUV way (copy, scale, turn, colour in the kernels), when the frame can be read and
+      // its colours were checked once against the canvas way; else the canvas way.
+      let msg = null;
+      if (cap.yuv && CamYuv.usable(frame) && fileYuv.ok !== false) {
+        let planes = null;
+        try {
+          planes = await cap.yuv.convert(frame, { sx: t.sx, sy: t.sy, sw: t.sw, sh: t.sh }, false, d.rotation);
+        } catch {
+          fileYuv.ok = false;
+        }
+        if (planes && fileYuv.ok === undefined) {
+          const rgba = draw();
+          const cal = cap.yuv.calibrate(rgba, planes);
+          if (cal) {
+            fileYuv.ok = cal.y < 3 && cal.u < 3 && cal.v < 3;
+            fileYuv.text = `${fileYuv.ok ? 'yuv' : 'canvas'}; yuv check Y ${cal.y.toFixed(1)}, U ${cal.u.toFixed(1)}, V ${cal.v.toFixed(1)}`;
+          } else if (++fileYuv.tries >= 10) {
+            fileYuv.ok = false;
+            fileYuv.text = 'canvas; no clear frame for the yuv check';
+          }
+          if (fileYuv.ok !== undefined) self.postMessage({ cmd: 'fileMethod', text: fileYuv.text });
+          if (fileYuv.ok !== true) {
+            planes = null;
+            msg = { cmd: 'rgba', rgba };
+          }
+        }
+        if (planes) msg = { cmd: 'planes', Y: planes[0], U: planes[1], V: planes[2] };
+      }
+      if (!msg) msg = { cmd: 'rgba', rgba: draw() };
       frame.close();
-      const rgba = ctx.getImageData(0, 0, w, h).data;
       cap.inFlight++;
       sent++;
       lastUs = us;
       const ms = performance.now() - t0;
-      cap.port.postMessage({ cmd: 'rgba', rgba, tsUs: m.sessionEndUs + (us - start), seq: seq++, grabMs: ms }, [rgba.buffer]);
+      Object.assign(msg, { tsUs: m.sessionEndUs + (us - start), seq: seq++, grabMs: ms });
+      cap.port.postMessage(msg, msg.rgba ? [msg.rgba.buffer] : [msg.Y.buffer]);
       if (performance.now() - lastPost > 200) {
         lastPost = performance.now();
         self.postMessage({ cmd: 'fileTime', us, durationUs: d.durationUs });

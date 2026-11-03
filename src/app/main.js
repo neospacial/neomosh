@@ -1076,7 +1076,7 @@ function updateSettingsSheet() {
       `Dropped frames: ${rec.drops} (this clip ${rec.clipDrops}: encoder busy ${rec.dropKinds.enc}, page late ${rec.dropKinds.page}, capture late ${rec.dropKinds.cap}; the camera skipped ${rec.camSkips || 0}, not drops; ` +
       `view skipped ${rec.viewSkips || 0}, the file has these frames). ` +
       `Frames: ${rec.frameCount}${rec.bloomFrames ? ` (bloom ${rec.bloomFrames} in this clip)` : ''}. ` +
-      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'file' ? 'file (each frame decoded, not real time)' : rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
+      `Camera: ${el.preview.videoWidth}×${el.preview.videoHeight}. Capture: ${rec.captureMode === 'file' ? `file (each frame decoded, not real time${rec.capMethod ? `; ${rec.capMethod}` : ''})` : rec.captureMode === 'worker' ? `worker${rec.capMethod ? ` (${rec.capMethod})` : ''}` : rec.captureMode === 'page' ? `page${rec.capReason ? ` (${rec.capReason})` : ''}` : '–'}. ` +
       `Codec: ${rec.wasm === undefined ? '–' : rec.wasm ? 'WebAssembly SIMD' : 'JavaScript'}. ` +
       `Browser: ${browserName()}${typeof VideoDecoder === 'undefined' ? ', no WebCodecs' : ''}. neomosh v${VERSION}`;
   }

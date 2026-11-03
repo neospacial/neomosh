@@ -362,6 +362,8 @@ export class Recorder {
         this.capWaiter = null;
         w();
       }
+    } else if (m.cmd === 'fileMethod') {
+      this.capMethod = m.text; // D34
     } else if (m.cmd === 'fileTime') {
       if (this.on.fileTime) this.on.fileTime(m.us, m.durationUs);
     } else if (m.cmd === 'capStopped') {
