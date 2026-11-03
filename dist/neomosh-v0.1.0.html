@@ -17,7 +17,7 @@
   --accent:#99ff00;
   --rec:#ff0080;   /* the red of the UI (recording dot, delete) */
   --core:#99ff00;  /* the record button (the square while recording) */
-  --warn:#ff9f0a;
+  --warn:#ff0080;  /* warnings: the dropped-frames badge, the frame-rate hint */
   --on-accent:#000;
   --text:#fff;
   --dim:#8e8e93;
@@ -29,10 +29,10 @@
   --row:#2c2c2e;
 }
 /* OS: the look of neocamera (iOS colours). */
-html[data-theme="os"]{--accent:#ffd60a;--rec:#ff3b30;--core:var(--rec)}
+html[data-theme="os"]{--accent:#ffd60a;--rec:#ff3b30;--core:var(--rec);--warn:#ff9f0a}
 /* Contrast: white for the accent and the record colour, full white text, outlines on the controls. */
 html[data-theme="contrast"]{
-  --accent:#fff;--rec:#fff;--core:#fff;--warn:#ffb340;--dim:#fff;--chip:#000;--line:rgba(255,255,255,.6);
+  --accent:#fff;--rec:#fff;--core:#fff;--warn:#fff;--dim:#fff;--chip:#000;--line:rgba(255,255,255,.6);
   --glass:rgba(0,0,0,.75);--sheet:#000;--row:#000;
 }
 html[data-theme="contrast"] .seg button,html[data-theme="contrast"] .ratio,html[data-theme="contrast"] #orientBtn,
@@ -83,7 +83,7 @@ body[data-state="recording"] #recDot{animation:blink 1s steps(1,end) infinite}
 body[data-state="paused"] #recDot,body[data-state="pausing"] #recDot,body[data-state="exporting"] #recDot{display:none}
 @keyframes blink{50%{opacity:.15}}
 
-.badge{display:none;align-items:center;gap:3px;height:24px;padding:0 6px;border-radius:12px;background:rgba(255,255,255,.08);font-size:12px;font-variant-numeric:tabular-nums}
+.badge{display:none;align-items:center;gap:3px;height:24px;padding:0 6px;border-radius:12px;background:var(--chip);font-size:12px;font-variant-numeric:tabular-nums}
 .badge svg{width:15px;height:15px;fill:currentColor}
 #dropBadge{color:var(--warn)}
 body[data-drops="1"] #dropBadge{display:flex}
@@ -5674,6 +5674,12 @@ function onState(st) {
     pillTimer = 0;
   }
   if (rec && !rec.drops) el.body.removeAttribute('data-drops');
+  // A video with no frames (new video, revert to the start): no picture of the last video stays in the
+  // view. Until the first decoded frame of the new clip, the live source shows.
+  if (rec && !rec.hasFrames && (st === ST.IDLE || st === ST.RECORDING)) {
+    const c = el.mosh;
+    c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  }
   if (rec && st === ST.IDLE && !rec.hasFrames && el.thumbImg.src) {
     URL.revokeObjectURL(el.thumbImg.src);
     el.thumbImg.removeAttribute('src');

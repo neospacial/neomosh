@@ -249,11 +249,16 @@ export const tests = [
         await page.click('#shutter');
         await h.waitState('paused');
         await page.click('#gearBtn');
-        const want = { os: ['rgb(255, 214, 10)', 'rgb(255, 59, 48)'], contrast: ['rgb(255, 255, 255)', 'rgb(255, 255, 255)'], night: ['rgb(232, 178, 125)', 'rgb(217, 120, 90)'] };
-        for (const [t, [a, r]] of Object.entries(want)) {
+        // The dropped-frames badge has the warning colour of the theme.
+        const warn = () => page.$eval('#dropBadge', (e) => getComputedStyle(e).color);
+        assert(await warn() === 'rgb(255, 0, 128)', `Default: the badge is #ff0080: ${await warn()}`);
+        const want = { os: ['rgb(255, 214, 10)', 'rgb(255, 59, 48)', 'rgb(255, 159, 10)'], contrast: ['rgb(255, 255, 255)', 'rgb(255, 255, 255)', 'rgb(255, 255, 255)'],
+          night: ['rgb(232, 178, 125)', 'rgb(217, 120, 90)', 'rgb(217, 160, 91)'] };
+        for (const [t, [a, r, wn]] of Object.entries(want)) {
           await page.click(`.seg[data-key="theme"] button[data-v="${t}"]`);
           await page.waitForTimeout(300); // the record colour fades in (.18 s)
           assert(await accent() === a && await core() === r, `${t}: accent ${await accent()}, record ${await core()}`);
+          assert(await warn() === wn, `${t}: badge ${await warn()}`);
           assert(await page.$eval('.orb', (e) => getComputedStyle(e).display === 'none'), `${t}: no orb`);
         }
         await page.click('#settingsSheet .done');

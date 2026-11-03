@@ -142,7 +142,12 @@ export const tests = [
         samePixels(await h.canvas('overlay'), over1, 'overlay after revert to 1');
         db = await h.db();
         assert(db.frames.length === pts[1].frameIndex && db.points.length === 2, 'revert 1');
+        // The view of the decoded output has the last picture of the session: after the revert to
+        // the start, it must be empty (no old picture when the next video starts).
+        const viewBefore = await page.$eval('#mosh', (c) => c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some((x, i) => i % 4 === 3 && x));
         await revert(0);
+        const viewAfter = await page.$eval('#mosh', (c) => c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some((x, i) => i % 4 === 3 && x));
+        assert(viewBefore && !viewAfter, `the view must be empty after the revert to the start (before ${viewBefore}, after ${viewAfter})`);
         db = await h.db();
         assert(!db.sessions.length && !db.frames.length && !db.points.length, 'revert 0 must delete the session');
         assert(!(await page.$eval('#orientBtn', (b) => b.disabled)), 'the session settings must unlock after revert to 0');
