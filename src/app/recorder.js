@@ -576,7 +576,7 @@ export class Recorder {
     const preview = this.decInFlight === 0 && live;
     if (!preview && live) this.viewSkips++;
     this.decInFlight++;
-    this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview });
+    this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview, gpu: true }); // D31: the live view by the GPU
     this.checkIdle();
   }
 

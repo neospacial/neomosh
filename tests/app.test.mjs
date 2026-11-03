@@ -22,6 +22,15 @@ export const tests = [
         await page.click('#shutter');
         await h.waitState('paused');
         assert(await page.isVisible('#overlay') && await page.isVisible('#guideBar'), 'overlay or guide bar not visible when paused');
+        // D31: the live view (a VideoFrame, the GPU converts the colour) shows the same picture as the
+        // exact overlay: the mean difference is small (about 1 here; the GPU can scale the chroma up in
+        // another way). Chromium draws the frame the same with fullRange true, so this does not check
+        // the range; it checks the picture, the size, and the conversion.
+        const live = await h.canvas('mosh'), exact = await h.canvas('overlay');
+        let sum = 0;
+        for (let i = 0; i < exact.data.length; i++) if (i % 4 !== 3) sum += Math.abs(live.data[i] - exact.data[i]);
+        const mean = sum / ((exact.data.length * 3) / 4);
+        assert(live.w === exact.w && mean < 2.5, `the live view differs from the decoded picture: mean ${mean.toFixed(2)}`);
         assert(await page.$eval('#thumbImg', (i) => !!i.getAttribute('src')), 'no thumbnail');
         assert(await page.$eval('#orientBtn', (b) => b.disabled), 'the ratio bar must lock after the first frame');
         await h.shot('paused');

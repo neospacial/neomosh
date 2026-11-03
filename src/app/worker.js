@@ -37,6 +37,37 @@ function decodedBitmap() {
   return canvas.transferToImageBitmap();
 }
 
+// D31: the decoded picture as an I420 VideoFrame (visible size). The page draws it, and the GPU does the
+// YUV to RGB conversion: no conversion in the kernels, no putImageData. The planes are next to each
+// other in the decoder memory, so the frame is made from one view (VideoFrame copies it). Returns null
+// when the browser cannot make it (then the bitmap way).
+let frameOk = typeof VideoFrame === 'function';
+function decodedFrame() {
+  if (!frameOk) return null;
+  try {
+    const { Y, U, V } = dec;
+    const cw = dec.codedW, n = Y.length, cn = U.length;
+    let data;
+    if (Y.buffer === V.buffer && U.byteOffset === Y.byteOffset + n && V.byteOffset === U.byteOffset + cn) {
+      data = new Uint8Array(Y.buffer, Y.byteOffset, n + 2 * cn);
+    } else {
+      data = new Uint8Array(n + 2 * cn);
+      data.set(Y);
+      data.set(U, n);
+      data.set(V, n + cn);
+    }
+    return new VideoFrame(data, {
+      format: 'I420', codedWidth: cw, codedHeight: dec.codedH, timestamp: 0,
+      visibleRect: { x: 0, y: 0, width: w, height: h },
+      layout: [{ offset: 0, stride: cw }, { offset: n, stride: cw >> 1 }, { offset: n + cn, stride: cw >> 1 }],
+      colorSpace: { primaries: 'bt709', transfer: 'bt709', matrix: 'bt709', fullRange: false },
+    });
+  } catch {
+    frameOk = false;
+    return null;
+  }
+}
+
 // Compile the hot code paths before the first real frame, so that the first frames are not dropped.
 function warmUp() {
   const e = new Encoder(64, 48, { qp: 28, searchRange: 16, precision: 'quarter', skipBias: 50, heal: 'off' });
@@ -480,11 +511,25 @@ const handlers = {
     enc.setSettings(m.settings);
   },
 
-  // Decoder. preview: make a bitmap for the viewfinder (R-21: the main thread skips it when late).
+  // Decoder. preview: make a picture for the viewfinder (R-21: the main thread skips it when late).
+  // gpu (D31): the live view takes a VideoFrame (the GPU converts the colour); the others an exact bitmap.
   packet(m) {
     const t0 = performance.now();
     const changed = dec.decodePacket(m.pkt, !!m.show);
-    const bitmap = changed && m.preview ? decodedBitmap() : null;
+    let bitmap = null;
+    if (changed && m.preview) {
+      const vf = m.gpu ? decodedFrame() : null;
+      if (vf) {
+        try {
+          self.postMessage({ cmd: 'decoded', seq: m.seq, bitmap: vf, ms: performance.now() - t0 }, [vf]);
+          return;
+        } catch {
+          vf.close();
+          frameOk = false; // a VideoFrame cannot go to the page here: bitmaps from now on
+        }
+      }
+      bitmap = decodedBitmap();
+    }
     self.postMessage({ cmd: 'decoded', seq: m.seq, bitmap, ms: performance.now() - t0 }, bitmap ? [bitmap] : []);
   },
   // The reference picture (plan §8.4 step 4) and a bitmap of it.

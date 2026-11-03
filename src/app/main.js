@@ -609,11 +609,13 @@ function updatePill() {
   el.clipLbl.textContent = rec.clip ? '· clip ' + rec.clip : '';
 }
 
+// bitmap: an ImageBitmap, or a VideoFrame (D31: the GPU converts the colour when it is drawn).
 function onDecoded(bitmap) {
   const c = el.mosh;
-  if (c.width !== bitmap.width || c.height !== bitmap.height) {
-    c.width = bitmap.width;
-    c.height = bitmap.height;
+  const bw = bitmap.displayWidth || bitmap.width, bh = bitmap.displayHeight || bitmap.height;
+  if (c.width !== bw || c.height !== bh) {
+    c.width = bw;
+    c.height = bh;
   }
   c.getContext('2d').drawImage(bitmap, 0, 0);
   bitmap.close();
