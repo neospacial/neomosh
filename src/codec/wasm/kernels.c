@@ -801,6 +801,81 @@ void turn_yuv(const u8 *sY, const u8 *sU, const u8 *sV, int sw, int sh, int rot,
   pad_coded(V, w >> 1, h >> 1, codedW >> 1, codedH >> 1);
 }
 
+/* D35: temporal denoise of one plane, in place. prev: the last output of this plane (it becomes this
+   output). For each sample: d = cur - prev, a = min(16, a0 + ((|d| * slope) >> 4)), out = prev +
+   ((d * a + 8) >> 4). A small d (sensor noise) moves the sample only a part of the way; a large d
+   (motion) a = 16 keeps the new sample. n: a multiple of 16. encoder.js denoiseJs is the same. */
+EXPORT(denoise_plane)
+void denoise_plane(u8 *cur, u8 *prev, int n, int a0, int slope) {
+  const v128_t k16 = wasm_i16x8_splat(16), kA0 = wasm_i16x8_splat((short)a0), kS = wasm_i16x8_splat((short)slope), k8 = wasm_i16x8_splat(8);
+  for (int i = 0; i < n; i += 16) {
+    const v128_t c = wasm_v128_load(cur + i), p = wasm_v128_load(prev + i);
+    v128_t o[2];
+    for (int h = 0; h < 2; h++) {
+      const v128_t cw = h ? wasm_u16x8_extend_high_u8x16(c) : wasm_u16x8_extend_low_u8x16(c);
+      const v128_t pw = h ? wasm_u16x8_extend_high_u8x16(p) : wasm_u16x8_extend_low_u8x16(p);
+      const v128_t d = wasm_i16x8_sub(cw, pw);
+      const v128_t ad = wasm_i16x8_abs(d);
+      const v128_t a = wasm_i16x8_min(k16, wasm_i16x8_add(kA0, wasm_i16x8_shr(wasm_i16x8_mul(ad, kS), 4)));
+      o[h] = wasm_i16x8_add(pw, wasm_i16x8_shr(wasm_i16x8_add(wasm_i16x8_mul(d, a), k8), 4));
+    }
+    const v128_t r = wasm_u8x16_narrow_i16x8(o[0], o[1]);
+    wasm_v128_store(cur + i, r);
+    wasm_v128_store(prev + i, r);
+  }
+}
+
+/* D35: spatial denoise of one plane (src -> dst, w x h, stride w): each sample moves toward the neighbours
+   of its 3x3 window that are within T of it: out = c + q15((sum of (n - c), |n - c| <= T) * 1/9). With all
+   8 neighbours within T this is the 3x3 mean; edges (large differences) stay. The border samples are
+   copied. encoder.js spatialJs is the same. */
+static inline int q15_9(int x) { // wasm i16x8.q15mulr_sat with 3641 (about 1/9)
+  int r = (x * 3641 + 16384) >> 15;
+  return r < -32768 ? -32768 : r > 32767 ? 32767 : r;
+}
+
+EXPORT(denoise_spatial)
+void denoise_spatial(const u8 *src, u8 *dst, int w, int h, int T) {
+  const v128_t kT = wasm_i16x8_splat((short)T), k9 = wasm_i16x8_splat(3641);
+  __builtin_memcpy(dst, src, w);
+  __builtin_memcpy(dst + (h - 1) * w, src + (h - 1) * w, w);
+  for (int y = 1; y < h - 1; y++) {
+    const u8 *r0 = src + (y - 1) * w, *r1 = src + y * w, *r2 = src + (y + 1) * w;
+    u8 *d = dst + y * w;
+    d[0] = r1[0];
+    d[w - 1] = r1[w - 1];
+    int x = 1;
+    for (; x + 16 <= w - 1; x += 16) {
+      const v128_t c8 = wasm_v128_load(r1 + x);
+      const u8 *nb[8] = {r0 + x - 1, r0 + x, r0 + x + 1, r1 + x - 1, r1 + x + 1, r2 + x - 1, r2 + x, r2 + x + 1};
+      v128_t out[2];
+      for (int hh = 0; hh < 2; hh++) {
+        const v128_t c = hh ? wasm_u16x8_extend_high_u8x16(c8) : wasm_u16x8_extend_low_u8x16(c8);
+        v128_t sum = wasm_i16x8_splat(0);
+        for (int k = 0; k < 8; k++) {
+          const v128_t n8 = wasm_v128_load(nb[k]);
+          const v128_t n = hh ? wasm_u16x8_extend_high_u8x16(n8) : wasm_u16x8_extend_low_u8x16(n8);
+          const v128_t dd = wasm_i16x8_sub(n, c);
+          const v128_t in = wasm_i16x8_le(wasm_i16x8_abs(dd), kT);
+          sum = wasm_i16x8_add(sum, wasm_v128_and(dd, in));
+        }
+        out[hh] = wasm_i16x8_add(c, wasm_i16x8_q15mulr_sat(sum, k9));
+      }
+      wasm_v128_store(d + x, wasm_u8x16_narrow_i16x8(out[0], out[1]));
+    }
+    for (; x < w - 1; x++) {
+      const int c = r1[x];
+      const int n[8] = {r0[x - 1], r0[x], r0[x + 1], r1[x - 1], r1[x + 1], r2[x - 1], r2[x], r2[x + 1]};
+      int sum = 0;
+      for (int k = 0; k < 8; k++) {
+        const int dd = n[k] - c;
+        if ((dd < 0 ? -dd : dd) <= T) sum += dd;
+      }
+      d[x] = (u8)clip255(c + q15_9(sum));
+    }
+  }
+}
+
 EXPORT(yuv420_to_rgba)
 void yuv420_to_rgba(const u8 *Y, const u8 *U, const u8 *V, int codedW, int w, int h, u8 *rgba) {
   const int cW = codedW >> 1;

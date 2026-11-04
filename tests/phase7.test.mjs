@@ -28,15 +28,15 @@ export const tests = [
         const { page } = h;
         await h.start();
         const looks = [
-          { qp: 44, searchRange: '8', precision: 'full', skipBias: 0, heal: 'high' },
-          { qp: 16, searchRange: '64', precision: 'quarter', skipBias: 100, heal: 'low' },
-          { qp: 30, searchRange: '16', precision: 'half', skipBias: 50, heal: 'off' },
+          { qp: 44, searchRange: '8', precision: 'full', skipBias: 0, heal: 'high', denoise: 'high' },
+          { qp: 16, searchRange: '64', precision: 'quarter', skipBias: 100, heal: 'low', denoise: 'low' },
+          { qp: 30, searchRange: '16', precision: 'half', skipBias: 50, heal: 'off', denoise: 'off' },
         ];
         for (const l of looks) {
           await settings(h, async (p) => {
             await setRange(p, 'qp', l.qp);
             await setRange(p, 'skipBias', l.skipBias);
-            for (const k of ['searchRange', 'precision', 'heal']) await p.click(`.seg[data-key="${k}"] button[data-v="${l[k]}"]`);
+            for (const k of ['searchRange', 'precision', 'heal', 'denoise']) await p.click(`.seg[data-key="${k}"] button[data-v="${l[k]}"]`);
             assert(await p.$eval('#qpVal', (e) => e.textContent) === String(l.qp), 'QP value label');
           });
           await page.click('#shutter');
@@ -54,7 +54,7 @@ export const tests = [
           };
         }));
         assert(looksStored.length === 4, `points: ${looksStored.length}`);
-        looks.forEach((l, i) => assert(looksStored[i + 1].qp === l.qp && looksStored[i + 1].heal === l.heal, `point ${i + 1} settings`));
+        looks.forEach((l, i) => assert(looksStored[i + 1].qp === l.qp && looksStored[i + 1].heal === l.heal && looksStored[i + 1].denoise === l.denoise, `point ${i + 1} settings`));
         const db = await h.db();
         const s = db.sessions[0];
         const mp4 = await h.exportMp4('set_export.mp4');

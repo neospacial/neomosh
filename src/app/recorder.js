@@ -47,7 +47,9 @@ function methodText(m) {
 // Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
 export class Recorder {
   // captureMethod: force the crop way of the capture worker ('yuv', 'bitmap', 'draw'; debug, D22).
-  constructor({ workerSrc, store, video, on, captureMethod }) {
+  // debugOpts (address options): { gpu: false (the live view by bitmaps), pcmI: true (I_PCM I-frames) }.
+  constructor({ workerSrc, store, video, on, captureMethod, debugOpts }) {
+    this.debugOpts = { gpu: true, pcmI: false, ...(debugOpts || {}) };
     this.captureMethod = ['yuv', 'bitmap', 'draw'].includes(captureMethod) ? captureMethod : null;
     if (this.captureMethod) this.capMethod = `${this.captureMethod}, forced`;
     this.workerSrc = workerSrc;
@@ -122,7 +124,7 @@ export class Recorder {
     const r = Promise.all([ready(this.enc), ready(this.dec), ready(this.cap)]);
     // The capture worker sends the pictures straight to the encoder worker (R-14).
     const ch = new MessageChannel();
-    this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2 }, [ch.port2]);
+    this.enc.postMessage({ cmd: 'init', role: 'enc', w, h, settings: this.settings, port: ch.port2, pcmI: this.debugOpts.pcmI }, [ch.port2]);
     this.dec.postMessage({ cmd: 'init', role: 'dec', w, h });
     // The way: forced (debug), else from the probe before the recording, else measured on the first frames.
     const preset = this.captureMethod || (this.capPreset && this.capPreset.method);
@@ -578,7 +580,7 @@ export class Recorder {
     const preview = this.decInFlight === 0 && live;
     if (!preview && live) this.viewSkips++;
     this.decInFlight++;
-    this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview, gpu: true }); // D31: the live view by the GPU
+    this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview, gpu: this.debugOpts.gpu }); // D31: the live view by the GPU
     this.checkIdle();
   }
 
@@ -721,7 +723,7 @@ export class Recorder {
     if (!p || !p.refY) throw new Error(`No pause point ${n}`);
     await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 and 2 (no audio: D20)
     this.dec.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV }); // step 4
-    this.settings = { ...p.settings }; // step 6
+    this.settings = checkSettings({ ...p.settings }); // step 6 (D35: old points have no denoise)
     this.enc.postMessage({ cmd: 'settings', settings: this.settings });
     this.enc.postMessage({ cmd: 'continueSession' }); // step 5
     this.pointList.length = n + 1;
@@ -770,7 +772,7 @@ export class Recorder {
     if (!pts.length || pts[0].n !== 0) pts.unshift({ n: 0, frameIndex: 0, tsUs: 0, drops: 0, thumb: null });
     for (const q of pts) this.pointList[q.n] = { n: q.n, frameIndex: q.frameIndex, tsUs: q.tsUs, drops: q.drops || 0, thumb: q.thumb, settings: q.settings };
     let last = pts[pts.length - 1];
-    if (last.settings) this.settings = { ...last.settings };
+    if (last.settings) this.settings = checkSettings({ ...last.settings });
     await this.startWorkers(session.w, session.h);
     if (last.refY) this.dec.postMessage({ cmd: 'setRef', Y: last.refY, U: last.refU, V: last.refV });
     this.applyPoint(last);
@@ -783,7 +785,7 @@ export class Recorder {
         this.decInFlight++;
         this.dec.postMessage({ cmd: 'packet', seq: f.index, pkt: f, preview: false });
         lastTs = f.tsUs;
-        if (f.settings) this.settings = { ...f.settings };
+        if (f.settings) this.settings = checkSettings({ ...f.settings });
       }
       await this.decIdle();
       if (last.n >= 1 && last.frameIndex < total) this.cuts = [...new Set([...this.cuts, last.frameIndex])].sort((a, b) => a - b);

@@ -22,7 +22,7 @@ import { QUANT_MF } from './tables.js';
 import { align16, writeSliceHeader, headerForFrame } from './headers.js';
 
 // Plan §7.2. Each value makes a datamosh.
-export const DEFAULT_SETTINGS = Object.freeze({ qp: 28, searchRange: 32, precision: 'half', skipBias: 50, heal: 'off' });
+export const DEFAULT_SETTINGS = Object.freeze({ qp: 28, searchRange: 32, precision: 'half', skipBias: 50, heal: 'off', denoise: 'off' });
 export const SETTING_VALUES = Object.freeze({
   qpMin: 16,
   qpMax: 44,
@@ -31,7 +31,14 @@ export const SETTING_VALUES = Object.freeze({
   skipBiasMin: 0,
   skipBiasMax: 100,
   heal: ['off', 'low', 'high'],
+  denoise: ['off', 'low', 'high'],
 });
+
+// D35: denoise strength. T: the spatial threshold (kernels.c denoise_spatial). a0, slope: the temporal
+// filter (kernels.c denoise_plane): the share of a new sample at |d| = 0 (a0 / 16), and the slope to 16
+// (all of the new sample) at |d| = 8 (low) or 16 (high). Measured (720p, noise sigma 8): encoder 11.0 ms
+// (off), 7.7 ms (low), 5.6 ms (high) for each frame, with the filter; 38, 4, 2 KB for each frame.
+const DENOISE = { low: { T: 12, a0: 4, slope: 24 }, high: { T: 24, a0: 2, slope: 14 } };
 
 export function checkSettings(s) {
   const v = SETTING_VALUES;
@@ -40,7 +47,9 @@ export function checkSettings(s) {
   if (!v.precision.includes(s.precision)) throw new Error('Bad precision');
   if (!Number.isInteger(s.skipBias) || s.skipBias < v.skipBiasMin || s.skipBias > v.skipBiasMax) throw new Error('Bad skipBias');
   if (!v.heal.includes(s.heal)) throw new Error('Bad heal');
-  return { qp: s.qp, searchRange: s.searchRange, precision: s.precision, skipBias: s.skipBias, heal: s.heal };
+  const denoise = s.denoise ?? 'off'; // settings stored before D35 have no denoise
+  if (!v.denoise.includes(denoise)) throw new Error('Bad denoise');
+  return { qp: s.qp, searchRange: s.searchRange, precision: s.precision, skipBias: s.skipBias, heal: s.heal, denoise };
 }
 
 // Heal: code I_PCM when the mean absolute error of the best inter prediction is above this value.
@@ -69,6 +78,37 @@ const SMALL_DIAMOND = [0, -1, -1, 0, 1, 0, 0, 1];
 const LARGE_DIAMOND = [0, -2, -1, -1, 1, -1, -2, 0, 2, 0, -1, 1, 1, 1, 0, 2];
 const RING = [-1, -1, 0, -1, 1, -1, -1, 0, 1, 0, -1, 1, 0, 1, 1, 1];
 
+// kernels.c denoise_spatial, in JavaScript (the same results).
+function spatialJs(src, dst, w, h, T) {
+  dst.set(src.subarray(0, w), 0);
+  dst.set(src.subarray((h - 1) * w, h * w), (h - 1) * w);
+  for (let y = 1; y < h - 1; y++) {
+    const o = y * w;
+    dst[o] = src[o];
+    dst[o + w - 1] = src[o + w - 1];
+    for (let x = 1; x < w - 1; x++) {
+      const c = src[o + x];
+      let sum = 0;
+      for (const k of [o - w + x - 1, o - w + x, o - w + x + 1, o + x - 1, o + x + 1, o + w + x - 1, o + w + x, o + w + x + 1]) {
+        const d = src[k] - c;
+        if ((d < 0 ? -d : d) <= T) sum += d;
+      }
+      const v = c + ((sum * 3641 + 16384) >> 15);
+      dst[o + x] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+  }
+}
+
+// kernels.c denoise_plane, in JavaScript (the same results).
+function denoiseJs(cur, prev, a0, slope) {
+  for (let i = 0; i < cur.length; i++) {
+    const p = prev[i], d = cur[i] - p, ad = d < 0 ? -d : d;
+    const a = Math.min(16, a0 + ((ad * slope) >> 4));
+    const o = p + ((d * a + 8) >> 4);
+    cur[i] = prev[i] = o < 0 ? 0 : o > 255 ? 255 : o;
+  }
+}
+
 export class Encoder {
   // w, h: visible size (even). settings: plan §7.2.
   constructor(w, h, settings = DEFAULT_SETTINGS) {
@@ -86,7 +126,7 @@ export class Encoder {
     this.k = k;
     if (k) {
       const p = {
-        rec: k.alloc(n + 2 * cn), src: k.alloc(n + 2 * cn), rgba: k.alloc(w * h * 4), pred: k.alloc(384),
+        rec: k.alloc(n + 2 * cn), src: k.alloc(n + 2 * cn), dn: k.alloc(n + 2 * cn), dt: k.alloc(n + 2 * cn), rgba: k.alloc(w * h * 4), pred: k.alloc(384),
         tmp: k.alloc(256), res: k.alloc(417 * 4), visited: k.alloc(129 * 129 * 4), mv: k.alloc(8),
         bits: k.alloc(this.numMbs * 1600 + 4096), out: k.alloc(this.numMbs * 1600 + 4096),
         prev: k.alloc(this.numMbs * 4), stats: k.alloc(16),
@@ -101,6 +141,8 @@ export class Encoder {
       this.kStats = k.i32(p.stats, 4);
       [this.recY, this.recU, this.recV] = [k.u8(p.rec, n), k.u8(p.rec + n, cn), k.u8(p.rec + n + cn, cn)];
       [this.srcY, this.srcU, this.srcV] = [k.u8(p.src, n), k.u8(p.src + n, cn), k.u8(p.src + n + cn, cn)];
+      [this.dnY, this.dnU, this.dnV] = [k.u8(p.dn, n), k.u8(p.dn + n, cn), k.u8(p.dn + n + cn, cn)];
+      [this.dtY, this.dtU, this.dtV] = [k.u8(p.dt, n), k.u8(p.dt + n, cn), k.u8(p.dt + n + cn, cn)];
       this.rgba = k.u8(p.rgba, w * h * 4);
       [this.predY, this.predU, this.predV] = [k.u8(p.pred, 256), k.u8(p.pred + 256, 64), k.u8(p.pred + 320, 64)];
       this.tmpY = k.u8(p.tmp, 256);
@@ -114,6 +156,8 @@ export class Encoder {
       this.ref = makeRef(this.codedW, this.codedH);
       [this.recY, this.recU, this.recV] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
       [this.srcY, this.srcU, this.srcV] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
+      [this.dnY, this.dnU, this.dnV] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
+      [this.dtY, this.dtU, this.dtV] = [new Uint8Array(n), new Uint8Array(cn), new Uint8Array(cn)];
       this.rgba = null;
       [this.predY, this.predU, this.predV] = [new Uint8Array(256), new Uint8Array(64), new Uint8Array(64)];
       this.tmpY = new Uint8Array(256);
@@ -144,11 +188,40 @@ export class Encoder {
   // R-12: the app calls this only while paused.
   setSettings(s) {
     this.settings = checkSettings(s);
+    this.dnValid = false;
+  }
+
+  // D35: denoise of the source: spatial (3x3, edges stay) into dt, then temporal (with the last output
+  // dn; not on the first frame after a cut or a change). The caller's planes do not change. Returns the
+  // planes to encode (dt).
+  denoise(Y, U, V, dn) {
+    const W = this.codedW, H = this.codedH;
+    const planes = [[Y, this.dtY, this.dnY, W, H], [U, this.dtU, this.dnU, W >> 1, H >> 1], [V, this.dtV, this.dnV, W >> 1, H >> 1]];
+    for (const [s, t, p, w, h] of planes) {
+      if (this.k) {
+        if (!this.k.has(s)) {
+          this.srcY.set(Y);
+          this.srcU.set(U);
+          this.srcV.set(V);
+          return this.denoise(this.srcY, this.srcU, this.srcV, dn);
+        }
+        this.k.x.denoise_spatial(s.byteOffset, t.byteOffset, w, h, dn.T);
+        if (this.dnValid) this.k.x.denoise_plane(t.byteOffset, p.byteOffset, t.length, dn.a0, dn.slope);
+        else p.set(t);
+      } else {
+        spatialJs(s, t, w, h, dn.T);
+        if (this.dnValid) denoiseJs(t, p, dn.a0, dn.slope);
+        else p.set(t);
+      }
+    }
+    this.dnValid = true;
+    return [this.dtY, this.dtU, this.dtV];
   }
 
   // Plan §8.5: the next frame is a hidden I-frame.
   newClip() {
     if (this.hasRef) this.nextType = 'hiddenI';
+    this.dnValid = false; // D35: no denoise across a cut
   }
 
   // Plan §12.3 and §11.6: continue a session that has frames (after a revert, or in a new worker
@@ -156,12 +229,14 @@ export class Encoder {
   continueSession() {
     this.nextType = 'hiddenI';
     this.hasRef = true;
+    this.dnValid = false;
   }
 
   // Plan §12.3, revert to point 0: the next frame is the IDR.
   restart() {
     this.nextType = 'idr';
     this.hasRef = false;
+    this.dnValid = false;
   }
 
   // The input planes from a visible RGBA picture (w x h). Returns [Y, U, V] for encode().
@@ -186,6 +261,8 @@ export class Encoder {
     }
     const type = this.nextType;
     const s = this.settings;
+    const dn = DENOISE[s.denoise];
+    if (dn) [Y, U, V] = this.denoise(Y, U, V, dn);
     const frame = { type, qp: s.qp };
     const bw = new BitWriter(type === 'p' ? 4096 + this.numMbs * 16 : this.numMbs * 390 + 64);
     writeSliceHeader(bw, headerForFrame(frame, 0));
