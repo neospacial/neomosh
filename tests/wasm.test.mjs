@@ -26,6 +26,10 @@ const SPECS = {
     ],
   },
   size_720: { w: 1280, h: 720, script: [{ record: 3, content: 'pan' }] },
+  denoise: {
+    w: 128, h: 96, settings: S({ denoise: 'low' }),
+    script: [{ record: 5, content: 'noise' }, { pause: true }, { settings: { denoise: 'high' } }, { record: 5, content: 'pan' }],
+  },
 };
 
 function run(spec, wasm) {

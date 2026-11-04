@@ -723,7 +723,7 @@ export class Recorder {
     if (!p || !p.refY) throw new Error(`No pause point ${n}`);
     await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 and 2 (no audio: D20)
     this.dec.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV }); // step 4
-    this.settings = { ...p.settings }; // step 6
+    this.settings = checkSettings({ ...p.settings }); // step 6 (D35: old points have no denoise)
     this.enc.postMessage({ cmd: 'settings', settings: this.settings });
     this.enc.postMessage({ cmd: 'continueSession' }); // step 5
     this.pointList.length = n + 1;
@@ -772,7 +772,7 @@ export class Recorder {
     if (!pts.length || pts[0].n !== 0) pts.unshift({ n: 0, frameIndex: 0, tsUs: 0, drops: 0, thumb: null });
     for (const q of pts) this.pointList[q.n] = { n: q.n, frameIndex: q.frameIndex, tsUs: q.tsUs, drops: q.drops || 0, thumb: q.thumb, settings: q.settings };
     let last = pts[pts.length - 1];
-    if (last.settings) this.settings = { ...last.settings };
+    if (last.settings) this.settings = checkSettings({ ...last.settings });
     await this.startWorkers(session.w, session.h);
     if (last.refY) this.dec.postMessage({ cmd: 'setRef', Y: last.refY, U: last.refU, V: last.refV });
     this.applyPoint(last);
@@ -785,7 +785,7 @@ export class Recorder {
         this.decInFlight++;
         this.dec.postMessage({ cmd: 'packet', seq: f.index, pkt: f, preview: false });
         lastTs = f.tsUs;
-        if (f.settings) this.settings = { ...f.settings };
+        if (f.settings) this.settings = checkSettings({ ...f.settings });
       }
       await this.decIdle();
       if (last.n >= 1 && last.frameIndex < total) this.cuts = [...new Set([...this.cuts, last.frameIndex])].sort((a, b) => a - b);

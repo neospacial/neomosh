@@ -1175,7 +1175,7 @@ document.querySelectorAll('#settingsSheet .seg button').forEach((b) => {
     const k = b.parentElement.dataset.key;
     const v = b.dataset.v;
     if (k === 'searchRange') return setEnc({ searchRange: Number(v) });
-    if (k === 'precision' || k === 'heal') return setEnc({ [k]: v });
+    if (k === 'precision' || k === 'heal' || k === 'denoise') return setEnc({ [k]: v });
     if (k === 'size' && !sessionLocked()) S.size = Number(v);
     if (k === 'fps' && !sessionLocked()) S.fps = Number(v);
     if (k === 'preview') S.preview = v === '1';
