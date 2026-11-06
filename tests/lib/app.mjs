@@ -105,7 +105,7 @@ export async function openApp(name, { camera = true, init = null, hash = '', cam
           fin();
         };
         tx.objectStore('points').getAll().onsuccess = (e) => {
-          out.points = e.target.result.map((p) => ({ n: p.n, frameIndex: p.frameIndex, tsUs: p.tsUs, ref: !!p.refY }));
+          out.points = e.target.result.map((p) => ({ n: p.n, frameIndex: p.frameIndex, tsUs: p.tsUs, ref: !!(p.refY || p.refZ), refBytes: p.refZ ? p.refZ.length : p.refY ? p.refY.length + p.refU.length + p.refV.length : 0, packed: !!p.refZ }));
           fin();
         };
       };

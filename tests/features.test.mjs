@@ -297,4 +297,48 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'D36: a pause point stored before D36 (planes, not compressed) still reverts to the same picture',
+    async fn() {
+      if (!chromium) return skip();
+      const h = await openApp('oldpoint');
+      try {
+        const { page } = h;
+        await h.start();
+        await h.clip(1000);
+        const over1 = await h.canvas('overlay');
+        await h.clip(800);
+        // Store point 1 as before D36: the planes refY, refU, refV, no refZ.
+        await page.evaluate(() => new Promise((resolve, reject) => {
+          const r = indexedDB.open('neomosh');
+          r.onsuccess = async () => {
+            const db = r.result;
+            const all = await new Promise((ok) => (db.transaction('points').objectStore('points').getAll().onsuccess = (e) => ok(e.target.result)));
+            const p = all.find((x) => x.n === 1);
+            const raw = new Uint8Array(await new Response(new Blob([p.refZ]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+            const n = (raw.length / 1.5) | 0, cn = n / 4;
+            Object.assign(p, { refZ: null, refY: raw.slice(0, n), refU: raw.slice(n, n + cn), refV: raw.slice(n + cn) });
+            const tx = db.transaction('points', 'readwrite');
+            tx.objectStore('points').put(p);
+            tx.oncomplete = resolve;
+            tx.onerror = reject;
+          };
+        }));
+        const pts = (await h.db()).points;
+        assert(pts[1].ref && !pts[1].packed, 'point 1 is stored as planes');
+        await page.click('#thumbBtn');
+        await h.waitState('review');
+        await page.waitForFunction(() => document.querySelectorAll('#cards .card').length > 0);
+        await page.click('#cards .card:nth-child(2)');
+        await page.waitForSelector('body[data-confirm="1"]');
+        await page.click('#confirmYes');
+        await h.waitState('paused');
+        const over = await h.canvas('overlay');
+        assert(over.data.length === over1.data.length && over.data.every((v, i) => v === over1.data[i]), 'the overlay after the revert differs');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
 ];
