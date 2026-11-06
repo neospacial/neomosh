@@ -19,6 +19,7 @@ const DECODE_ERRORS = [
   '', 'mb_skip_run too large', 'Macroblock type is not supported', 'Bits left after the last macroblock',
   'pcm_alignment_zero_bit is not zero', 'Motion vector out of range', 'coded_block_pattern out of range',
   'mb_qp_delta out of range', 'CAVLC: invalid code', 'BitReader: read past end',
+  'intra_chroma_pred_mode out of range', 'Intra mode without its neighbours',
 ];
 
 export class Decoder {
@@ -84,8 +85,8 @@ export class Decoder {
   decodeSliceData(br, intra, sliceQp) {
     if (!intra && !this.hasRef) throw new Error('P picture without a reference picture');
     const nBytes = (br.len + 7) >> 3;
-    // D33: an I slice (Intra 16x16) is decoded in JavaScript; a P slice in the kernels.
-    if (this.k && nBytes <= this.bitCap && !intra) {
+    // The whole slice in the kernels (P slices, and I slices with Intra 16x16 and I_PCM, D37).
+    if (this.k && nBytes <= this.bitCap) {
       // The whole slice in the kernels (kernels.c decode_slice, the same steps as below).
       this.bitBuf.set(br.buf.subarray(0, nBytes));
       const err = this.k.x.decode_slice(this.bitBuf.byteOffset, br.pos, br.len, br.alignBase, intra ? 1 : 0, sliceQp,

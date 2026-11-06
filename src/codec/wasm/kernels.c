@@ -1327,6 +1327,36 @@ static void hadamard4x4(const int *c, int *f) {
 static i32 i_ac[256], i_cb[64], i_cr[64], i_dc[16], i_cbdc[4], i_crdc[4];
 static u8 i_pY[256], i_pU[64], i_pV[64], i_tY[256], i_tU[64], i_tV[64];
 
+// The reconstruction of an Intra 16x16 MB (intra.js reconIntra16) from the levels in i_dc, i_ac,
+// i_cbdc, i_crdc, i_cb, i_cr and the prediction in i_pY, i_pU, i_pV. dY, dU, dV: the MB in the planes.
+// The encoder and the decoder call it (D37).
+static void recon_intra16(int qp, int cbpL, int cbpC, u8 *dY, int W, u8 *dU, u8 *dV, int cW) {
+  int f[16], dcY[16];
+  hadamard4x4(i_dc, f);
+  const int ls = 16 * DEQUANT_V[qp % 6][0], q6 = qp / 6;
+  for (int i = 0; i < 16; i++) dcY[i] = qp >= 36 ? (f[i] * ls) << (q6 - 6) : (f[i] * ls + (1 << (5 - q6))) >> (6 - q6);
+  for (int b = 0; b < 16; b++) {
+    const int bx = b & 3, by = b >> 2;
+    recon4x4_v(i_ac + b * 16, qp, 1, dcY[b], !cbpL, i_pY + by * 64 + bx * 4, 16, dY + by * 4 * W + bx * 4, W);
+  }
+  const int qpc = CHROMA_QP[qp];
+  for (int comp = 0; comp < 2; comp++) {
+    const u8 *pred = comp ? i_pV : i_pU;
+    u8 *P = comp ? dV : dU;
+    if (!cbpC) {
+      for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) P[y * cW + x] = pred[y * 8 + x];
+      continue;
+    }
+    int dcOut[4];
+    dequant_chroma_dc(comp ? i_crdc : i_cbdc, qpc, dcOut);
+    const i32 *ac = comp ? i_cr : i_cb;
+    for (int b = 0; b < 4; b++) {
+      const int bx = b & 1, by = b >> 1;
+      recon4x4_v(ac + b * 16, qpc, 1, dcOut[b], cbpC != 2, pred + by * 32 + bx * 4, 8, P + by * 4 * cW + bx * 4, cW);
+    }
+  }
+}
+
 static void encode_intra_mb(i32 *I, const u8 *sY, const u8 *sU, const u8 *sV, u8 *rY, u8 *rU, u8 *rV, int W, int mbx, int mby, int qp) {
   const int cW = W >> 1, mbW = I[IMBW], addr = mby * mbW + mbx;
   const int yOff = mby * 16 * W + mbx * 16, cOff = mby * 8 * cW + mbx * 8;
@@ -1427,32 +1457,7 @@ static void encode_intra_mb(i32 *I, const u8 *sY, const u8 *sU, const u8 *sV, u8
       }
     }
   }
-  // The reconstruction (intra.js reconIntra16).
-  {
-    int f[16], dcY[16];
-    hadamard4x4(i_dc, f);
-    const int ls = 16 * DEQUANT_V[qp % 6][0], q6 = qp / 6;
-    for (int i = 0; i < 16; i++) dcY[i] = qp >= 36 ? (f[i] * ls) << (q6 - 6) : (f[i] * ls + (1 << (5 - q6))) >> (6 - q6);
-    for (int b = 0; b < 16; b++) {
-      const int bx = b & 3, by = b >> 2;
-      recon4x4_v(i_ac + b * 16, qp, 1, dcY[b], !cbpL, i_pY + by * 64 + bx * 4, 16, rY + yOff + by * 4 * W + bx * 4, W);
-    }
-  }
-  for (int comp = 0; comp < 2; comp++) {
-    const u8 *pred = comp ? i_pV : i_pU;
-    u8 *P = (comp ? rV : rU) + cOff;
-    if (!cbpC) {
-      for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) P[y * cW + x] = pred[y * 8 + x];
-      continue;
-    }
-    int dcOut[4];
-    dequant_chroma_dc(comp ? i_crdc : i_cbdc, qpc, dcOut);
-    const i32 *ac = comp ? i_cr : i_cb;
-    for (int b = 0; b < 4; b++) {
-      const int bx = b & 1, by = b >> 1;
-      recon4x4_v(ac + b * 16, qpc, 1, dcOut[b], cbpC != 2, pred + by * 32 + bx * 4, 8, P + by * 4 * cW + bx * 4, cW);
-    }
-  }
+  recon_intra16(qp, cbpL, cbpC, rY + yOff, W, rU + cOff, rV + cOff, cW);
 }
 
 // All macroblocks of an I picture (the writer must be set: bw_reset).
@@ -1730,6 +1735,62 @@ int decode_slice(const u8 *bits, int start, int len, int alignBase, int intra, i
       for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) dV[y * cW + x] = (u8)get(8);
       if (br_err) return br_err;
       set_info(I, addr, MB_PCM, 0, 0, 16);
+    } else if (intra && mbType >= 1 && mbType <= 24) {
+      // Intra 16x16 (D37; decoder.js decodeIntra16, intra.js reconIntra16)
+      const int mode = (mbType - 1) % 4, cbpC = ((mbType - 1) / 4) % 3, cbpL = mbType >= 13 ? 15 : 0;
+      const unsigned cmode = get_ue();
+      if (br_err) return br_err;
+      if (cmode > 3) return 10;
+      const int dq = get_se();
+      if (br_err) return br_err;
+      if (dq < -26 || dq > 25) return 7;
+      qp = (qp + dq + 52) % 52;
+      set_info(I, addr, MB_INTRA, 0, 0, 0);
+      u8 *nzL = P8(I[INZL]), *nzCb = P8(I[INZCB]), *nzCr = P8(I[INZCR]);
+      int coef[16];
+      for (int i = 0; i < 16; i++) coef[i] = 0;
+      read_block(coef, 16, luma_nc(nzL, addr, mbx, mby, mbW, 0, 0));
+      if (br_err) return br_err;
+      for (int i = 0; i < 16; i++) i_dc[ZIGZAG4x4[i]] = coef[i];
+      for (int i = 0; i < 256; i++) i_ac[i] = 0;
+      if (cbpL) {
+        for (int b8 = 0; b8 < 4; b8++) {
+          for (int b4 = 0; b4 < 4; b4++) {
+            const int bx = (b8 & 1) * 2 + (b4 & 1), by = (b8 >> 1) * 2 + (b4 >> 1), b = by * 4 + bx;
+            for (int i = 0; i < 16; i++) coef[i] = 0;
+            const int nn = read_block(coef, 15, luma_nc(nzL, addr, mbx, mby, mbW, bx, by));
+            if (br_err) return br_err;
+            nzL[addr * 16 + b] = (u8)nn;
+            for (int i = 0; i < 15; i++) i_ac[b * 16 + ZIGZAG4x4[i + 1]] = coef[i];
+          }
+        }
+      }
+      for (int i = 0; i < 64; i++) i_cb[i] = i_cr[i] = 0;
+      for (int i = 0; i < 4; i++) i_cbdc[i] = i_crdc[i] = 0;
+      if (cbpC) {
+        for (int comp = 0; comp < 2; comp++) {
+          for (int i = 0; i < 4; i++) coef[i] = 0;
+          read_block(coef, 4, -1);
+          if (br_err) return br_err;
+          for (int i = 0; i < 4; i++) (comp ? i_crdc : i_cbdc)[i] = coef[i];
+        }
+      }
+      if (cbpC == 2) {
+        for (int comp = 0; comp < 2; comp++) {
+          u8 *nz = comp ? nzCr : nzCb;
+          i32 *ac = comp ? i_cr : i_cb;
+          for (int b = 0; b < 4; b++) {
+            for (int i = 0; i < 16; i++) coef[i] = 0;
+            const int nn = read_block(coef, 15, chroma_nc(nz, addr, mbx, mby, mbW, b & 1, b >> 1));
+            if (br_err) return br_err;
+            nz[addr * 4 + b] = (u8)nn;
+            for (int i = 0; i < 15; i++) ac[b * 16 + ZIGZAG4x4[i + 1]] = coef[i];
+          }
+        }
+      }
+      if (!pred_i16(Y, W, mbx, mby, mode, i_pY)) return 11;
+      if (!pred_ic(U, cW, mbx, mby, (int)cmode, i_pU) || !pred_ic(V, cW, mbx, mby, (int)cmode, i_pV)) return 11;
+      recon_intra16(qp, cbpL, cbpC, dY, W, dU, dV, cW);
     } else if (!intra && mbType == 0) {
       // P_L0_16x16
       int px, py;
