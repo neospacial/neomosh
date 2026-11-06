@@ -568,10 +568,13 @@ const handlers = {
     self.postMessage({ cmd: 'decoded', seq: m.seq, bitmap, ms: performance.now() - t0 }, bitmap ? [bitmap] : []);
   },
   // The reference picture (plan §8.4 step 4) and a bitmap of it.
-  snapshot(m) {
+  // compress (D36): the planes as one deflate-raw block Z (a pause point in the store), else Y, U, V.
+  async snapshot(m) {
     const s = dec.snapshot();
     const bitmap = dec.hasRef ? decodedBitmap() : null;
-    self.postMessage({ cmd: 'snapshot', id: m.id, ...s, bitmap }, [s.Y.buffer, s.U.buffer, s.V.buffer, ...(bitmap ? [bitmap] : [])]);
+    const Z = m.compress ? await packRef(s) : null;
+    if (Z) self.postMessage({ cmd: 'snapshot', id: m.id, Z, bitmap }, [Z.buffer, ...(bitmap ? [bitmap] : [])]);
+    else self.postMessage({ cmd: 'snapshot', id: m.id, ...s, bitmap }, [s.Y.buffer, s.U.buffer, s.V.buffer, ...(bitmap ? [bitmap] : [])]);
   },
   // Upscale export. { w, h, outW, outH, smooth, codec, bitrate, fps }
   upInit(m) {
@@ -616,10 +619,34 @@ const handlers = {
   },
 
   // R-08: set the reference picture.
-  setRef(m) {
-    dec.setRef(m.Y, m.U, m.V);
+  // Y, U, V; or Z (D36: a compressed pause point).
+  async setRef(m) {
+    if (m.Z) {
+      const all = await unpackRef(m.Z);
+      const n = dec.Y.length, cn = dec.U.length;
+      if (all.length !== n + 2 * cn) throw new Error('The pause point picture has the wrong size');
+      dec.setRef(all.subarray(0, n), all.subarray(n, n + cn), all.subarray(n + cn));
+    } else dec.setRef(m.Y, m.U, m.V);
   },
 };
+
+// D36: the picture of a pause point, compressed without loss (deflate-raw, CompressionStream). It is
+// about 35% of its size with a camera picture (1.4 MB at 720p, 3 MB at 1080p before). Null without
+// CompressionStream (then the planes are stored as they are).
+async function packRef(s) {
+  if (typeof CompressionStream !== 'function') return null;
+  try {
+    const out = new Blob([s.Y, s.U, s.V]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(out).arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+async function unpackRef(Z) {
+  const out = new Blob([Z]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(out).arrayBuffer());
+}
 
 async function upFrame(m) {
   if (dec.decodePacket(m.pkt, m.show)) {
@@ -644,19 +671,41 @@ self.onmessage = (e) => {
   if (e.data.cmd === 'kernels') {
     setKernelsModule(e.data.module);
     kernelsSet = true;
-    for (const m of waiting.splice(0)) run(m);
+    for (const m of waiting.splice(0)) dispatch(m);
     return;
   }
   if (!kernelsSet) waiting.push(e.data);
-  else run(e.data);
+  else dispatch(e.data);
 };
+
+// The messages run in order. A handler that returns a promise (setRef with a compressed picture, a
+// snapshot, Upscale frames) holds the next messages until it ends, so that, for example, no packet is
+// decoded before its reference picture is set (D36).
+let busy = null;
+const later = [];
+function dispatch(m) {
+  if (busy) {
+    later.push(m);
+    return;
+  }
+  const r = run(m);
+  if (r && r.then) {
+    busy = r.then(() => {}, () => {}).then(() => {
+      busy = null;
+      const q = later.splice(0);
+      while (q.length && !busy) dispatch(q.shift());
+      if (q.length) later.unshift(...q);
+    });
+  }
+}
 
 function run(m) {
   const fail = (err) => self.postMessage({ cmd: 'error', message: String(err && err.message ? err.message : err), during: m.cmd });
   try {
     const r = handlers[m.cmd](m);
-    if (r && r.catch) r.catch(fail);
+    if (r && r.catch) return r.catch(fail);
   } catch (err) {
     fail(err);
   }
+  return null;
 }

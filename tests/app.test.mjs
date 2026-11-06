@@ -50,6 +50,9 @@ export const tests = [
         assert(db.frames.length > 40, `only ${db.frames.length} frames stored`);
         assert(/^idr(,p)+,hiddenI(,p)+$/.test(db.frames.map((f) => f.type).join(',')), 'frame types');
         assert(db.points.map((p) => p.frameIndex).join() === `0,${db.points[1].frameIndex},${db.frames.length}`, 'pause points');
+        // D36: the pause point pictures are stored compressed (deflate-raw), smaller than the planes.
+        const planes = s.w * s.h * 1.5;
+        assert(db.points.slice(1).every((p) => p.packed && p.refBytes < planes), `pause point pictures: ${db.points.map((p) => p.refBytes).join(', ')} B (planes ${planes} B)`);
         for (let i = 1; i < db.frames.length; i++) assert(db.frames[i].tsUs > db.frames[i - 1].tsUs, 'timestamps must increase');
 
         const mp4 = await h.exportMp4('app_export.mp4');

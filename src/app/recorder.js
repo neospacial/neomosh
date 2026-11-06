@@ -38,6 +38,11 @@ export function prepareKernels() {
   return kernels;
 }
 
+// The setRef message of a stored pause point: compressed (D36) or the planes.
+export function refMessage(p) {
+  return p.refZ ? { cmd: 'setRef', Z: p.refZ } : { cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV };
+}
+
 // The info text of a capture way result: the way, the times of each way, the YUV colour check.
 function methodText(m) {
   return `${m.method}; ${Object.entries(m.times).map(([k, v]) => `${k} ${v.toFixed(1)} ms`).join(', ')}` +
@@ -672,7 +677,8 @@ export class Recorder {
     }
     await this.putPoint({
       n: this.points + 1, frameIndex: this.frameCount, tsUs: this.sessionEndUs, drops, thumb,
-      refY: snap.Y, refU: snap.U, refV: snap.V,
+      // D36: refZ (the compressed planes), or refY, refU, refV (no CompressionStream, and points before D36).
+      refZ: snap.Z || null, refY: snap.Z ? null : snap.Y, refU: snap.Z ? null : snap.U, refV: snap.Z ? null : snap.V,
     });
     if (this.on.paused) this.on.paused(snap.bitmap, thumb);
     this.setState(ST.PAUSED);
@@ -692,7 +698,7 @@ export class Recorder {
         this.snapWaiter = null;
         resolve(m);
       };
-      this.dec.postMessage({ cmd: 'snapshot' });
+      this.dec.postMessage({ cmd: 'snapshot', compress: true }); // D36: compressed in the worker
     });
   }
 
@@ -720,9 +726,9 @@ export class Recorder {
   async revertTo(n) {
     this.lastP = null; // the bloom source is found again in the store
     const p = await this.store.getPoint(this.session.id, n);
-    if (!p || !p.refY) throw new Error(`No pause point ${n}`);
+    if (!p || !(p.refY || p.refZ)) throw new Error(`No pause point ${n}`);
     await this.store.truncate(this.session.id, p.frameIndex, n); // steps 1 and 2 (no audio: D20)
-    this.dec.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV }); // step 4
+    this.dec.postMessage(refMessage(p)); // step 4
     this.settings = checkSettings({ ...p.settings }); // step 6 (D35: old points have no denoise)
     this.enc.postMessage({ cmd: 'settings', settings: this.settings });
     this.enc.postMessage({ cmd: 'continueSession' }); // step 5
@@ -747,13 +753,19 @@ export class Recorder {
   }
 
   // Plan §11.4 "New video" (and revert to point 0): delete the session. Then IDLE.
+  // New video: delete the session. The page clears its pictures of the old video at once (on.discard),
+  // so the live view shows while the store deletes; IDLE comes also when the delete fails.
   async discard() {
+    if (this.on.discard) this.on.discard();
     this.setState(ST.PAUSING);
-    if (this.session) await this.store.deleteSession(this.session.id);
-    this.stopWorkers();
-    this.session = null;
-    this.reset();
-    this.setState(ST.IDLE);
+    try {
+      if (this.session) await this.store.deleteSession(this.session.id);
+    } finally {
+      this.stopWorkers();
+      this.session = null;
+      this.reset();
+      this.setState(ST.IDLE);
+    }
   }
 
   // Plan §11.6: continue a stored session. Returns false when it has no frames.
@@ -774,7 +786,7 @@ export class Recorder {
     let last = pts[pts.length - 1];
     if (last.settings) this.settings = checkSettings({ ...last.settings });
     await this.startWorkers(session.w, session.h);
-    if (last.refY) this.dec.postMessage({ cmd: 'setRef', Y: last.refY, U: last.refU, V: last.refV });
+    if (last.refY || last.refZ) this.dec.postMessage(refMessage(last));
     this.applyPoint(last);
     this.setState(ST.PAUSING);
     if (total > last.frameIndex) {

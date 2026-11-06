@@ -3,7 +3,7 @@
 // Seek uses checkpoints: the pause point references (IndexedDB), and decoder snapshots that the
 // player makes every 2 s during playback (RAM only).
 
-import { makeWorker } from './recorder.js';
+import { makeWorker, refMessage } from './recorder.js';
 
 const SNAPSHOT_EVERY_US = 2e6;
 const MAX_SNAPSHOTS = 90;
@@ -96,7 +96,7 @@ export class Player {
         if (start.Y) this.worker.postMessage({ cmd: 'setRef', Y: start.Y, U: start.U, V: start.V });
         else if (start.point) {
           const p = await this.store.getPoint(this.session.id, start.point);
-          this.worker.postMessage({ cmd: 'setRef', Y: p.refY, U: p.refU, V: p.refV });
+          this.worker.postMessage(refMessage(p)); // D36: compressed or the planes
         }
         this.cur = { index: start.frameIndex, tsUs: Math.max(0, start.keyUs) };
       }
