@@ -747,13 +747,19 @@ export class Recorder {
   }
 
   // Plan §11.4 "New video" (and revert to point 0): delete the session. Then IDLE.
+  // New video: delete the session. The page clears its pictures of the old video at once (on.discard),
+  // so the live view shows while the store deletes; IDLE comes also when the delete fails.
   async discard() {
+    if (this.on.discard) this.on.discard();
     this.setState(ST.PAUSING);
-    if (this.session) await this.store.deleteSession(this.session.id);
-    this.stopWorkers();
-    this.session = null;
-    this.reset();
-    this.setState(ST.IDLE);
+    try {
+      if (this.session) await this.store.deleteSession(this.session.id);
+    } finally {
+      this.stopWorkers();
+      this.session = null;
+      this.reset();
+      this.setState(ST.IDLE);
+    }
   }
 
   // Plan §11.6: continue a stored session. Returns false when it has no frames.

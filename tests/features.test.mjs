@@ -256,4 +256,45 @@ export const tests = [
       }
     },
   },
+  {
+    name: 'New video: no old picture in the view while the video is deleted; then the live view',
+    async fn() {
+      if (!chromium) return skip();
+      // Record whether the decoded view shows a picture at each state change after New video.
+      const init = () => {
+        window.__seen = [];
+        const set = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+          set.call(this, name, value);
+          if (name !== 'data-state' || !window.__watch) return;
+          const c = document.getElementById('mosh');
+          const shown = getComputedStyle(c).display !== 'none';
+          const pic = c.width > 0 && c.getContext('2d').getImageData(0, 0, c.width, c.height).data.some((x, i) => i % 4 === 3 && x);
+          window.__seen.push(`${value}:${shown && pic ? 'old picture' : 'clear'}`);
+        };
+      };
+      const h = await openApp('newvideo', { init });
+      try {
+        const { page } = h;
+        await h.start();
+        await h.clip(1200);
+        await h.clip(800);
+        await page.click('#thumbBtn');
+        await h.waitState('review');
+        await page.evaluate(() => (window.__watch = true));
+        await page.click('#newVideo');
+        await page.click('#confirmYes');
+        await h.waitState('idle');
+        const seen = await page.evaluate(() => window.__seen);
+        assert(seen.length && seen.every((s) => s.endsWith('clear')), `the old picture showed: ${seen.join(', ')}`);
+        assert(await page.isVisible('#preview'), 'the live view shows');
+        // The first clip of the new video starts from the live view.
+        await h.clip(800);
+        assert((await h.db()).frames[0].type === 'idr', 'a new video');
+        assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
+      } finally {
+        await h.close();
+      }
+    },
+  },
 ];

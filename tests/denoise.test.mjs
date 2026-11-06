@@ -14,7 +14,7 @@ export const tests = [
       const size = (sim) => sim.frames.slice(1).reduce((a, f) => a + f.bits.length, 0);
       const sims = {};
       for (const denoise of ['off', 'low', 'high']) {
-        sims[denoise] = simulate({ w: 160, h: 120, settings: S({ denoise }), script });
+        sims[denoise] = simulate({ w: 160, h: 120, settings: S({ denoise, heal: 'off' }), script }); // Heal adds I_PCM blocks either way
         for (const cuts of ['mosh', 'clean']) verify(`denoise_${denoise}_${cuts}`, sims[denoise], cuts);
       }
       assert(size(sims.high) < 0.9 * size(sims.off), `high ${size(sims.high)} B, off ${size(sims.off)} B`);

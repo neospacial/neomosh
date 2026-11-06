@@ -22,7 +22,8 @@ import { QUANT_MF } from './tables.js';
 import { align16, writeSliceHeader, headerForFrame } from './headers.js';
 
 // Plan §7.2. Each value makes a datamosh.
-export const DEFAULT_SETTINGS = Object.freeze({ qp: 28, searchRange: 32, precision: 'half', skipBias: 50, heal: 'off', denoise: 'off' });
+// v0.5.0 defaults: QP 30, quarter motion, Heal Low, Denoise Low (were QP 28, half, Off, Off).
+export const DEFAULT_SETTINGS = Object.freeze({ qp: 30, searchRange: 32, precision: 'quarter', skipBias: 50, heal: 'low', denoise: 'low' });
 export const SETTING_VALUES = Object.freeze({
   qpMin: 16,
   qpMax: 44,

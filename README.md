@@ -4,11 +4,11 @@ neomosh is a video recorder in one standalone HTML file. It makes a **true datam
 
 The exported file is a valid H.264 (Constrained Baseline) stream. Each conforming player shows the same moshed pictures.
 
-> Status: v0.1.0. All phases are done: codec, MP4 export, recorder, history, file source, settings, and Upscale export. neomosh records video only (no audio). See `neomosh-plan-v0.1.0.md`.
+> Status: v0.5.0. All phases are done: codec, MP4 export, recorder, history, file source, settings, and Upscale export. neomosh records video only (no audio). See `neomosh-plan-v0.1.0.md`.
 
 ## How to use
 
-1. Put `dist/neomosh-v0.1.0.html` on a web server with HTTPS (for example GitHub Pages), or open it on `localhost`. Browsers refuse camera access on plain HTTP. Safari also refuses it on a local `file://` page.
+1. Put `dist/neomosh-v0.5.0.html` on a web server with HTTPS (for example GitHub Pages), or open it on `localhost`. Browsers refuse camera access on plain HTTP. Safari also refuses it on a local `file://` page.
 2. Touch **Start** and give permission to the camera. When the phone has more than one rear camera, chips at the bottom of the view (for example **0.5×**, **1×**, **Tele**, or **1**, **2**, **3**) select one, before a clip or while paused. When the camera can zoom, pinch the view with two fingers (also while recording); the chip with the level (for example **2.5×**) goes back to 1× when you touch it.
 3. Touch the red button to record. The view shows the decoded output of the encoder.
 4. Touch the button again to pause. The last picture shows above the live camera. Move the **Guide** slider to change its opacity, and align the next shot.
@@ -34,12 +34,12 @@ Touch the gear (top left).
 | Size (short side) | 360, 480, 720, 1080 | 480 | Before the first recorded frame. 720 and 1080 need a fast device |
 | Frame rate | 15, 24, 30 | 30 | Before the first recorded frame. A hint shows when the device is too slow for the rate |
 | Shape | 1:1, 4:3, 3:2, 16:9; vertical or horizontal | 4:3, from the screen | Before the first recorded frame (bar above the view) |
-| Quality (QP) | 16–44 | 28 | While paused. High = coarse blocks; low = clean detail, larger file |
+| Quality (QP) | 16–44 | 30 | While paused. High = coarse blocks; low = clean detail, larger file |
 | Search range | ±8, ±16, ±32, ±64 | ±32 | While paused. Larger = longer smears with fast motion, more CPU |
-| Motion | Full, Half, Quarter | Half | While paused. Full = blocky steps; Quarter = smooth flowing smear |
+| Motion | Full, Half, Quarter | Quarter | While paused. Full = blocky steps; Quarter = smooth flowing smear |
 | Skip bias | 0–100 | 50 | While paused. High = more old pixels stay |
-| Heal | Off, Low, High | Off | While paused. Low and High repair bad areas (partial mosh) |
-| Denoise | Off, Low, High | Off | While paused. Removes sensor noise before the encoder: faster and smaller with a noisy camera (for example a second rear camera), a little smoother picture |
+| Heal | Off, Low, High | Low | While paused. Low and High repair bad areas (partial mosh) |
+| Denoise | Off, Low, High | Low | While paused. Removes sensor noise before the encoder: faster and smaller with a noisy camera (for example a second rear camera), a little smoother picture |
 | Mosh preview | On, Off | On | At any time. Off shows the raw source while recording |
 | Mirror front camera | On, Off | On | At any time. Applies to the next clip |
 | Theme | Default (green and pink, an animated orb record button), OS (yellow and red), Contrast (white, outlines), Night (soft warm colours) | Default | At any time. Only the look of the app, not the video |
@@ -67,7 +67,7 @@ Requirements: Node.js 20 or later. FFmpeg and ffprobe for the tests.
 
 | Command | Result |
 |---|---|
-| `node tools/build.mjs` | Makes `dist/neomosh-v0.1.0.html` and `dist/neomosh-bench-v0.1.0.html`, and copies the app to `index.html` (the page for GitHub Pages) |
+| `node tools/build.mjs` | Makes `dist/neomosh-v0.5.0.html` and `dist/neomosh-bench-v0.5.0.html`, and copies the app to `index.html` (the page for GitHub Pages) |
 | `node tools/build-wasm.mjs` | Compiles `src/codec/wasm/kernels.c` to WebAssembly (needs clang with the wasm32 target). Only after a change to the C code: the compiled module is in the repository |
 | `node tests/run.mjs [filter]` | Runs the tests. Output files go to `tests/out/` |
 | `node tools/bench.mjs [frames]` | Runs the encoder benchmark in Node |
@@ -76,7 +76,7 @@ Requirements: Node.js 20 or later. FFmpeg and ffprobe for the tests.
 ### Benchmark on a phone
 
 1. Run `node tools/build.mjs`.
-2. Copy `dist/neomosh-bench-v0.1.0.html` to the phone (for example with AirDrop or Files), or serve it from a local web server.
+2. Copy `dist/neomosh-bench-v0.5.0.html` to the phone (for example with AirDrop or Files), or serve it from a local web server.
 3. Open it, tap **Run**, and wait until it shows "Done".
 4. Tap **Copy results** and send the text.
 

@@ -610,6 +610,11 @@ function updatePill() {
   el.clipLbl.textContent = rec.clip ? '· clip ' + rec.clip : '';
 }
 
+// New video: no picture of the old video stays in the view (the decoded view and the guide overlay).
+function clearViews() {
+  for (const c of [el.mosh, el.overlay]) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+}
+
 // bitmap: an ImageBitmap, or a VideoFrame (D31: the GPU converts the colour when it is drawn).
 function onDecoded(bitmap) {
   const c = el.mosh;
@@ -1369,7 +1374,7 @@ async function start(fresh) {
       workerSrc: WORKER_SRC, store, video: el.preview,
       on: {
         state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000),
-        filePlay: playFile, fileTime: onFileTime, fileStopped: onFileStopped,
+        filePlay: playFile, fileTime: onFileTime, fileStopped: onFileStopped, discard: clearViews,
         bloom: (on) => {
           el.bloomBtn.classList.toggle('on', on);
           el.bloomBtn.setAttribute('aria-pressed', String(on));

@@ -328,11 +328,12 @@ Visible sizes (horizontal; swap for vertical): 360 → 360×360, 480×360, 540×
 
 | Setting | Range | Default | Effect on the look |
 |---|---|---|---|
-| Quality (QP) | 16–44 | 28 | High QP = coarse residual, more blocks. Low QP = cleaner detail in moving areas, larger files, more CPU. |
+| Quality (QP) | 16–44 | 30 (v0.5.0; was 28) | High QP = coarse residual, more blocks. Low QP = cleaner detail in moving areas, larger files, more CPU. |
 | Search range | ±8, ±16, ±32, ±64 | ±32 | Larger range = longer smears with fast motion. More CPU. |
-| Motion precision | Full, Half, Quarter | Half | Full = blocky steps. Quarter = smooth flowing smear. |
+| Motion precision | Full, Half, Quarter | Quarter (v0.5.0; was Half) | Full = blocky steps. Quarter = smooth flowing smear. |
 | Skip bias | 0–100 | 50 | High = more P_Skip blocks, more old pixels stay. Low = more coded motion. |
-| Heal | Off, Low, High | **Off** | Off = pure mosh. Low/High = intra blocks repair bad areas (partial mosh). |
+| Heal | Off, Low, High | **Low** (v0.5.0; was Off) | Off = pure mosh. Low/High = intra blocks repair bad areas (partial mosh). |
+| Denoise | Off, Low, High | Low (v0.5.0, D35) | Removes sensor noise before the encoder (faster, smaller; a little smoother). |
 
 All values make a datamosh. Heal Low/High makes a partial mosh, by design.
 

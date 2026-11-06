@@ -63,7 +63,7 @@ export const tests = [
         // Default look button.
         await settings(h, async (p) => {
           await p.click('#encReset');
-          assert(await p.$eval('#qp', (e) => e.value) === '28', 'default QP');
+          assert(await p.$eval('#qp', (e) => e.value) === '30', 'default QP (v0.5.0)');
         });
         assert(!h.errors.length, `page errors: ${h.errors.join(' | ')}`);
       } finally {
