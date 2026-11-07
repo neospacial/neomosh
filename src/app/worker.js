@@ -202,6 +202,7 @@ async function fileClip(m, run) {
   dec.configure(decoderConfig(d));
   const gate = new FrameGate(m.fps);
   let next = first, flushed = false, start = null, sent = 0, seq = m.seq, lastUs = m.startUs, ended = false, lastPost = 0;
+  let pace = null; // D38: { wall, us }: the clock of the file time
   // Read the samples in runs of up to 4 MB that are next to each other in the file.
   let buf = null, bufFrom = 0, bufTo = 0;
   const readAt = async (s) => {
@@ -241,6 +242,20 @@ async function fileClip(m, run) {
       if (us < m.startUs - period / 2 || !gate.next(us / 1000).keep) {
         frame.close();
         continue;
+      }
+      // D38: never faster than real time. Each frame waits for its time on the clock (from the first
+      // frame); a frame that is late moves the clock (no faster frames to catch up).
+      const now = performance.now();
+      if (!pace || now > pace.wall + (us - pace.us) / 1000) pace = { wall: now, us };
+      const due = pace.wall + (us - pace.us) / 1000;
+      while (run === cap.run && !failure && performance.now() < due - 1) {
+        await new Promise((r) => {
+          const t = setTimeout(r, due - performance.now());
+          wake = () => {
+            clearTimeout(t);
+            r();
+          };
+        });
       }
       // No drop: wait for the encoder.
       while (cap.inFlight >= MAX_IN_FLIGHT && run === cap.run && !failure) await wait();
@@ -313,13 +328,15 @@ async function fileClip(m, run) {
   }
 }
 
-// After a stop: cancel the stream when no frame came for 300 ms. Then no frame is in its queue
-// (a cancel drops the queued frames without close()).
+// After a stop the stream ends by itself (the track is stopped) once its queued frames are read and
+// closed here. Only when no frame came for 3 s, cancel it (a cancel drops the queued frames without
+// close()). The frames come through the page's main thread, which can be busy for some 100 ms at a
+// pause (thumbnail, storage): a shorter wait dropped frames that were still on their way.
 function armQuietCancel(reader) {
   clearTimeout(cap.quietTimer);
   cap.quietTimer = setTimeout(() => {
     if (cap.reader === reader) reader.cancel().catch(() => {});
-  }, 300);
+  }, 3000);
 }
 
 // One clip from the camera. m: { readable | track, fps, mirror, sessionEndUs, seq, vw, vh }.
