@@ -68,12 +68,15 @@ export const tests = [
         assert(await page.isVisible('#fileBar'), 'the file scrubber must show in IDLE');
         assert(await page.$eval('#flip', (b) => b.disabled), 'the camera switch must be disabled with a file');
         await seekFile(page, 1.0);
+        const wall0 = Date.now();
         await h.clip(1500);
+        const wall = (Date.now() - wall0) / 1000;
         let fs1 = await fileState(page);
         assert(fs1.paused, 'the file must pause with the recording');
-        // D25: the capture worker decodes the file at its own speed (not real time) and drops no
-        // frame: clip 1 has each file frame from 1.0 s, 1/30 s apart, up to the new file position.
+        // D25: the capture worker decodes the file and drops no frame: clip 1 has each file frame
+        // from 1.0 s, 1/30 s apart, up to the new file position. D38: never faster than real time.
         assert(fs1.t > 1.5, `the file position moved from 1.0 s to ${fs1.t} s`);
+        assert(fs1.t - 1.0 <= wall + 0.1, `the file went faster than real time: ${(fs1.t - 1.0).toFixed(2)} s of the file in ${wall.toFixed(2)} s`);
         const c1 = (await h.db()).frames;
         for (let i = 1; i < c1.length; i++) assert(Math.abs(c1[i].tsUs - c1[i - 1].tsUs - 33333) <= 1, `file clip: frame ${i} after ${c1[i].tsUs - c1[i - 1].tsUs} us`);
         assert(Math.abs(c1.length - Math.round((fs1.t - 1.0) * 30)) <= 1, `file clip: ${c1.length} frames for ${(fs1.t - 1.0).toFixed(3)} s of the file`);
