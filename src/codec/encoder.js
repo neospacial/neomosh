@@ -265,7 +265,8 @@ export class Encoder {
     const dn = DENOISE[s.denoise];
     if (dn) [Y, U, V] = this.denoise(Y, U, V, dn);
     const frame = { type, qp: s.qp };
-    const bw = new BitWriter(type === 'p' ? 4096 + this.numMbs * 16 : this.numMbs * 390 + 64);
+    // With the kernels, this writer gets only the slice header (the kernels write the slice data).
+    const bw = new BitWriter(this.k ? 64 : type === 'p' ? 4096 + this.numMbs * 16 : this.numMbs * 390 + 64);
     writeSliceHeader(bw, headerForFrame(frame, 0));
     const hdrBits = bw.pos;
     this.stats = { skip: 0, inter: 0, pcm: 0 };

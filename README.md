@@ -40,7 +40,7 @@ Touch the gear (top left).
 | Skip bias | 0–100 | 50 | While paused. High = more old pixels stay |
 | Heal | Off, Low, High | Low | While paused. Low and High repair bad areas (partial mosh) |
 | Denoise | Off, Low, High | Low | While paused. Removes sensor noise before the encoder: faster and smaller with a noisy camera (for example a second rear camera), a little smoother picture |
-| Mosh preview | On, Off | On | At any time. Off shows the raw source while recording |
+| Mosh preview | On, Off | On | At any time. Off shows the raw source while recording, and saves the work of the decoded live view |
 | Mirror front camera | On, Off | On | At any time. Applies to the next clip |
 | Theme | Default (green and pink, an animated orb record button), OS (yellow and red), Contrast (white, outlines), Night (soft warm colours) | Default | At any time. Only the look of the app, not the video |
 

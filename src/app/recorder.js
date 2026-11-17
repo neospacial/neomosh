@@ -49,7 +49,8 @@ function methodText(m) {
     (m.calib ? `; yuv check ${m.calib}` : '');
 }
 
-// Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg).
+// Callbacks (all optional): state(st), decoded(bitmap), drop(total), paused(bitmap), error(msg), toast(msg),
+// viewShown() (false: the page does not show the decoded live view now, so it gets no pictures).
 export class Recorder {
   // captureMethod: force the crop way of the capture worker ('yuv', 'bitmap', 'draw'; debug, D22).
   // debugOpts (address options): { gpu: false (the live view by bitmaps), pcmI: true (I_PCM I-frames) }.
@@ -139,6 +140,8 @@ export class Recorder {
   }
 
   stopWorkers() {
+    clearInterval(this.bloomTimer); // no bloom tick may post to a worker that ended
+    this.bloomTimer = 0;
     for (const wk of [this.enc, this.dec, this.cap]) if (wk) wk.terminate();
     this.enc = this.dec = this.cap = null;
     this.capActive = false;
@@ -582,8 +585,10 @@ export class Recorder {
     // R-21: the recording has priority over the live view. When the decoder is still busy with the
     // last frame, this frame gets no preview picture. The frame is decoded and stored all the same.
     const live = this.state === ST.RECORDING || this.state === ST.BLOOMING;
-    const preview = this.decInFlight === 0 && live;
-    if (!preview && live) this.viewSkips++;
+    // The page does not show the decoded view (Mosh preview off): no picture, only the decode.
+    const shown = !this.on.viewShown || this.on.viewShown();
+    const preview = this.decInFlight === 0 && live && shown;
+    if (!preview && live && shown) this.viewSkips++;
     this.decInFlight++;
     this.dec.postMessage({ cmd: 'packet', seq: m.seq, pkt, preview, gpu: this.debugOpts.gpu }); // D31: the live view by the GPU
     this.checkIdle();
@@ -592,11 +597,14 @@ export class Recorder {
   onDec(m) {
     if (m.cmd === 'error') {
       if (m.during === 'packet') this.decInFlight--;
+      // A failed snapshot: the pause must not wait for it for ever.
+      if (m.during === 'snapshot' && this.snapWaiter) this.snapWaiter({ bitmap: null });
       this.fail(`Decoder: ${m.message}`);
       return this.checkIdle();
     }
     if (m.cmd === 'snapshot') {
       if (this.snapWaiter) this.snapWaiter(m);
+      else if (m.bitmap) m.bitmap.close();
       return;
     }
     if (m.cmd !== 'decoded') return;

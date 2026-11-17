@@ -79,7 +79,9 @@ export class Store {
   async flush() {
     clearTimeout(this.timer);
     this.timer = 0;
-    if (this.flushing) await this.flushing;
+    // Wait for every write in progress: a second caller that waits for the same write must not return
+    // before the batch that the first caller starts after it is stored.
+    while (this.flushing) await this.flushing;
     if (!this.pending.length) return;
     const batch = this.pending;
     this.pending = [];

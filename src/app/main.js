@@ -939,11 +939,17 @@ async function openReview() {
       },
     });
   }
-  await player.open(rec.session, rec.pointList, rec.frameCount, rec.sessionEndUs);
+  try {
+    await player.open(rec.session, rec.pointList, rec.frameCount, rec.sessionEndUs);
+  } catch (e) {
+    toast('The player did not open: ' + (e && e.message), 5000);
+  }
 }
 
 function closeReview() {
   if (player) player.close();
+  cardUrls.forEach((u) => URL.revokeObjectURL(u));
+  cardUrls = [];
   if (rec && rec.state === ST.REVIEW) rec.setState(ST.PAUSED);
 }
 
@@ -1375,6 +1381,9 @@ async function start(fresh) {
       on: {
         state: onState, decoded: onDecoded, paused: onPaused, drop: onDrop, toast, error: (m) => toast(m, 5000),
         filePlay: playFile, fileTime: onFileTime, fileStopped: onFileStopped, discard: clearViews,
+        // The decoded live view shows (style.css #mosh): Mosh preview on, a file clip in the capture
+        // worker, or a bloom. Else the decoder makes no pictures for the page.
+        viewShown: () => S.preview || rec.captureMode === 'file' || rec.state === ST.BLOOMING,
         bloom: (on) => {
           el.bloomBtn.classList.toggle('on', on);
           el.bloomBtn.setAttribute('aria-pressed', String(on));
@@ -1461,6 +1470,9 @@ el.selfTest.addEventListener('click', async () => {
     }
     el.selfTestOut.textContent = lines.join('\n');
     el.selfTestOut.dataset.result = ok ? 'pass' : 'fail';
+  } catch (e) {
+    el.selfTestOut.textContent = 'The self-test failed: ' + (e && e.message);
+    el.selfTestOut.dataset.result = 'fail';
   } finally {
     el.selfTest.disabled = false;
     rec.setState(prev);
